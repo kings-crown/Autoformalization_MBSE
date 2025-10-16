@@ -1,0 +1,14 @@
+{
+  "name": "autoformalization-mbse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pipeline that turns functional requirements into Typed Logical Forms and SMT-LIB using a wasm-backed Z3 solver.",
+  "scripts": {
+    "pipeline:run": "node src/cli.js",
+    "pipeline:test": "node --test \"tests/**/*.test.js\""
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}
