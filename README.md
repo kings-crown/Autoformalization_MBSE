@@ -7,7 +7,7 @@ The Python toolkit complements this flow with automatic policy translation and S
 generation.
 
 ```
-requirements.json ─┐
+requirements.json  ─┐
                     │ src/pipeline.js ─► logical form ─► SMT-LIB ─► Z3 result
 policy.txt       ───┘                         ▲
                                            scripts/openai_toolkit.py
