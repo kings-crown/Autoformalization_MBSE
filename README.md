@@ -9,7 +9,7 @@ generation.
 ```
 requirements.json  ─┐
                     │ src/pipeline.js ─► logical form ─► SMT-LIB ─► Z3 result
-policy.txt       ───┘                         ▲
+requirements.tx  ───┘                         ▲
                                            scripts/openai_toolkit.py
 ```
 
