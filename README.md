@@ -111,8 +111,6 @@ z3 out/policy_charging_unsat.smt2   # unsat
 
 | Path | Purpose |
 |------|---------|
-| `examples/door-controller.json` | Sample requirement set for the pipeline. |
-| `examples/battery-charger.smt2` | Standalone SMT-LIB example (not generated). |
 | `policy_charging.txt` | Example policy used in the toolkit walkthrough. |
 | `scripts/openai_toolkit.py` | Python CLI (translate & harvest commands). |
 | `src/cli.js` | Node CLI driver (see §1.1). |
