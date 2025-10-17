@@ -1,5 +1,0 @@
-{
-  "status": "ok",
-  "runner": "native",
-  "result": "sat\n(model \n  (define-fun door_state () DoorState\n    CLOSED)\n  (define-fun credential_presented () Bool\n    false)\n  (define-fun lock_engaged () Bool\n    true)\n  (define-fun next_lock_engaged ((x!0 DoorState) (x!1 Bool) (x!2 Bool)) Bool\n    true)\n)"
-}

@@ -1,0 +1,5 @@
+*.smt2
+*.env
+*.json
+*.txt
+
