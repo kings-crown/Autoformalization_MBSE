@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Utility CLI for OpenAI-assisted MBSE workflows.
 
