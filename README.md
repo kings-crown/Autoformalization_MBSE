@@ -150,8 +150,59 @@ Place `z3.js`, `z3.wasm`, and `z3.worker.cjs` under `src/solver/vendor/` to enab
 | Translate a policy and emit SAT/UNSAT SMT files | `OPENAI_API_KEY=sk-... python scripts/openai_toolkit.py translate --statement policy_charging.txt --write-smt-prefix out/policy_charging --output-json out/policy_charging_translate.json` |
 | Harvest requirements from a long PDF/text | `OPENAI_API_KEY=sk-... python scripts/openai_toolkit.py harvest --source requirements.txt --set-id SYS --title "Target System" --system "Subsystem" > examples/harvested.json` |
 | Run the SMT generator test suite | `npm run pipeline:test` |
+| End-to-end requirements → SMT → SysML pipeline | `OPENAI_API_KEY=sk-... python scripts/requirements_pipeline.py --statement Requirements_examples/delivery_methods.txt --output-prefix out/delivery_methods --sysml-output SysML-v2-Release/sysml/DeliveryMethods.sysml` |
+
+## 6.1 SysML notebook launcher
+
+The project ships with `scripts/run_sysml_lab.sh`, a helper that activates the SysML Conda
+environment and launches Jupyter Lab with the SysML kernel preloaded.
+
+```bash
+# From the repo root
+./scripts/run_sysml_lab.sh
+```
+
+The script defaults to the environment at `/home/balaji/miniconda3/envs/sysml-0.52.0` and opens the
+`SysML-v2-Release` folder as the notebook root. Override either value at runtime if needed:
+
+```bash
+SYSML_CONDA_ENV=/alternate/env/path \
+SYSML_NOTEBOOK_DIR=/path/to/notebooks \
+./scripts/run_sysml_lab.sh --port 8891 --no-browser
+```
+
+Because the script finishes by `exec`-ing `jupyter lab`, any extra flags you pass are forwarded
+directly to Jupyter (e.g., `--ip`, `--NotebookApp.token=""`, etc.).
 
 ---
+
+## 6.2 Requirements → SMT → SysML pipeline
+
+Use `scripts/requirements_pipeline.py` when you want a single command to translate a plain-text
+requirement, generate and validate the SAT/UNSAT SMT artefacts, and emit a SysML model that packages
+the results. By default it also loads the generated `.sysml` file with the SysML kernel to ensure the
+textual model compiles cleanly.
+
+```bash
+OPENAI_API_KEY=sk-... \
+python scripts/requirements_pipeline.py \
+  --statement Requirements_examples/delivery_methods.txt \
+  --output-prefix out/delivery_methods \
+  --sysml-output SysML-v2-Release/sysml/DeliveryMethods.sysml
+```
+
+Key outputs:
+- `<prefix>_translate.json` – full translation payload.
+- `<prefix>_sat.smt2` and `<prefix>_unsat.smt2` – solver artefacts with validation results.
+- `<sysml-output>` – generated SysML package summarising the artefact lineage with dedicated context,
+  requirement, analysis, and view definitions.
+
+Pass `--skip-sysml-compile` to write the SysML file without launching the Java kernel (useful if the
+kernel is not installed locally), `--model` to override the OpenAI model, or
+`--sysml-context prompt_contexts/sysml_requirement_template.sysml` to inject a modelling template
+snippet that guides the structure of the generated SysML package. The generated SysML docs now
+include explicit next-step instructions (e.g., add domain parts, refine constraints, extend views) so
+engineers know how to elaborate the scaffold into a full design.
 
 ## 6. Example Artefacts
 
@@ -289,4 +340,3 @@ This project is released under the MIT License (see `LICENSE`).
   are contradictory.
 - **MBSE** – Model-Based Systems Engineering, emphasising formal system models alongside textual
   documentation.
-
