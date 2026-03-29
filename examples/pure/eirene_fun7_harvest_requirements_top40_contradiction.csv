@@ -1,0 +1,42 @@
+id,requirement
+EIRENE_FUN7-R001,The GSM-R network shall provide voice communication services for railway operations.
+EIRENE_FUN7-R002,The GSM-R network shall provide data communication services for railway operations.
+EIRENE_FUN7-R003,"The GSM-R network shall support call-related services needed to establish, manage, and terminate communications."
+EIRENE_FUN7-R004,The GSM-R network shall provide railway-specific communication services in addition to general telecommunications services.
+EIRENE_FUN7-R005,The GSM-R network specification shall define a verifiable call set-up time requirement for the communication system.
+EIRENE_FUN7-R006,The system shall support broadcast calls addressed to all members of a pre-defined group within a local geographical area.
+EIRENE_FUN7-R007,"During a broadcast call, the system shall permit voice transmission only from the call initiator and shall prevent all other group members from transmitting while allowing them to receive the call audio."
+EIRENE_FUN7-R008,The cab radio shall provide radio communication capability through interfaces installed in the cab of a locomotive for principal use by the locomotive driver.
+EIRENE_FUN7-R009,"If the cab radio supports train control, the cab radio shall include the interfaces required to support train-control communications in addition to driver radio communications."
+EIRENE_FUN7-R010,"In direct mode, the system shall support back-to-back or set-to-set radio communication without use of ground infrastructure."
+EIRENE_FUN7-R011,The driver alertness monitoring system shall monitor the alertness state of the driver and shall provide warnings and alarms to other systems when the monitored state indicates that such warnings or alarms are appropriate.
+EIRENE_FUN7-R012,An EIRENE network shall be based on the ETSI GSM standard.
+EIRENE_FUN7-R013,An EIRENE network shall comply with all mandatory requirements specified in the EIRENE FRS and SRS.
+EIRENE_FUN7-R014,"If an optional feature is included in an EIRENE network or EIRENE system, that feature shall be implemented as specified in the EIRENE FRS and SRS."
+EIRENE_FUN7-R015,"A group call function shall support communication to all members of a predefined group within a local geographical area, and during an active group call no more than one group member shall be permitted to talk at any instant while all other group members remain in listen-only mode."
+EIRENE_FUN7-R016,The system shall support a group voice call in which the call initiator explicitly defines the set of participating parties before or at call setup.
+EIRENE_FUN7-R017,"For a group voice call, the system shall permit all participating parties to transmit and receive speech simultaneously without enforcing single-speaker turn taking."
+EIRENE_FUN7-R018,"The system shall provide a railway emergency call service with priority higher than non-emergency voice calls for informing drivers, controllers, and other concerned personnel of a danger condition requiring railway movements in a predefined area to stop."
+EIRENE_FUN7-R019,"The system shall support exactly two railway emergency call types: train emergency call for railway emergencies when shunting operations are not in progress, and shunting emergency call for railway emergencies when shunting operations are in progress."
+EIRENE_FUN7-R020,The system shall provide each Secondary Controller with the ability to communicate with trains in all operating situations within the controller's designated area of track.
+EIRENE_FUN7-R021,"When a train is being pushed backwards toward buffers or any other potential obstruction, the radio system shall support a communication link from a designated lookout to the driver for reporting movement progress during the maneuver."
+EIRENE_FUN7-R022,The radio system shall support ground-train voice communications and ground-train data communications for train operations.
+EIRENE_FUN7-R023,"The radio system shall support mobile voice and data communications for trackside workers, station staff, depot staff, and railway administrative and managerial personnel."
+EIRENE_FUN7-R024,The radio system shall provide interoperable communications for trains and staff crossing national borders or other system borders between railway networks.
+EIRENE_FUN7-R025,"The radio system shall support functional addressing in which a stock number assigned permanently to an item of traction or rolling stock, and a train number assigned for a particular journey, may each be used as a component of a functional number for addressing users or systems."
+EIRENE_FUN7-R026,"On railway lines where international interoperability is required, the railway radio system shall comply with all requirements in this specification that are designated as Mandatory (M)."
+EIRENE_FUN7-R027,"If an Optional (O) feature defined by the specification is implemented, the railway radio system shall implement that feature using the method defined in the SRS and FRS."
+EIRENE_FUN7-R028,"The railway radio system shall provide point-to-point voice call service, public emergency call service, broadcast voice call service, group voice call service, and multi-party voice call service."
+EIRENE_FUN7-R029,"The railway radio system shall provide a text message bearer service, a bearer service for general data applications, a bearer service for automatic fax, and a bearer service for train control applications."
+EIRENE_FUN7-R030,"The railway radio system shall provide the following call-related services: closed user group, multi-level priority and pre-emption, advanced call handling, auto answer service, barring of incoming or outgoing calls, call supervisory indications, and charging information."
+EIRENE_FUN7-R031,"The EIRENE mobile telephony system shall support functional addressing using at least one of the following identifiers: train number, engine number, coach number, or functional number."
+EIRENE_FUN7-R032,The EIRENE mobile telephony system shall provide a shunting operations mode that emits or provides a link assurance signal while the mode is active.
+EIRENE_FUN7-R033,The EIRENE mobile telephony system shall support railway operational emergency calls.
+EIRENE_FUN7-R034,The EIRENE mobile telephony system shall support direct mode local set-to-set operation without requiring network infrastructure.
+EIRENE_FUN7-R035,The EIRENE mobile telephony system shall provide seamless communication support for trains operating at speeds up to 500 km/h.
+EIRENE_FUN7-R036,"The EIRENE network shall support the following voice telephony service types: point-to-point voice calls, public emergency voice calls, broadcast voice calls, group voice calls, and multi-party voice calls."
+EIRENE_FUN7-R037,Each supported voice call service shall be operable between any combination of fixed equipment users and mobile equipment users.
+EIRENE_FUN7-R038,"For each point-to-point voice call, the system shall provide full duplex communication such that both call parties can talk simultaneously during the call."
+EIRENE_FUN7-R039,"For each broadcast voice call, the system shall restrict speaking permission to the call initiator and shall restrict all other participating users to listen-only operation for the duration of the call."
+EIRENE_FUN7-R040,"For each multi-party voice call, the system shall support no more than six distinct participating parties and shall allow any participating parties to talk simultaneously."
+EIRENE_FUN7-R041,"For each broadcast voice call, all participating users shall be allowed to transmit simultaneously for the duration of the call."

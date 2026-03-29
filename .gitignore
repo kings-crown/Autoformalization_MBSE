@@ -1,7 +1,5 @@
 *.smt2
 *.env
-*.json
-*.txt
-
-SysML-v2-Release
+out/
+results/
 SysML-v2-Release

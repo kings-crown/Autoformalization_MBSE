@@ -1,0 +1,330 @@
+{
+  "components": [
+    {
+      "id": "parser",
+      "name": "RequirementsParser",
+      "description": "Parses structured requirements sources."
+    },
+    {
+      "id": "classifier",
+      "name": "IntentClassifier",
+      "description": "Classifies requirement intent categories."
+    },
+    {
+      "id": "formalizer",
+      "name": "ConstraintFormalizer",
+      "description": "Synthesizes formal constraints from classified intent."
+    },
+    {
+      "id": "verifier",
+      "name": "SmtVerifier",
+      "description": "Executes solver checks and reports evidence."
+    },
+    {
+      "id": "repairManager",
+      "name": "RepairManager",
+      "description": "Refines constraints from counterexample diagnostics."
+    },
+    {
+      "id": "memoryManager",
+      "name": "MemoryManager",
+      "description": "Maintains short-term and project memory state."
+    },
+    {
+      "id": "humanReviewGate",
+      "name": "HumanReviewGate",
+      "description": "Handles approval before baseline promotion."
+    },
+    {
+      "id": "controller",
+      "name": "WorkflowController",
+      "description": "Coordinates workflow state transitions and budgets."
+    }
+  ],
+  "ports": [
+    {
+      "owner": "parser",
+      "name": "sourceIn",
+      "direction": "in",
+      "data_type": "String",
+      "signal": "requirementsSource"
+    },
+    {
+      "owner": "parser",
+      "name": "parsedOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "parsedRequirements"
+    },
+    {
+      "owner": "classifier",
+      "name": "intentIn",
+      "direction": "in",
+      "data_type": "String",
+      "signal": "parsedRequirements"
+    },
+    {
+      "owner": "classifier",
+      "name": "intentOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "classifiedIntent"
+    },
+    {
+      "owner": "formalizer",
+      "name": "formalIn",
+      "direction": "in",
+      "data_type": "String",
+      "signal": "classifiedIntent"
+    },
+    {
+      "owner": "formalizer",
+      "name": "formalOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "formalConstraints"
+    },
+    {
+      "owner": "verifier",
+      "name": "verifyIn",
+      "direction": "in",
+      "data_type": "String",
+      "signal": "formalConstraints"
+    },
+    {
+      "owner": "verifier",
+      "name": "verifyOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "verificationReport"
+    },
+    {
+      "owner": "repairManager",
+      "name": "repairIn",
+      "direction": "in",
+      "data_type": "String",
+      "signal": "verificationReport"
+    },
+    {
+      "owner": "repairManager",
+      "name": "repairOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "repairedConstraints"
+    },
+    {
+      "owner": "memoryManager",
+      "name": "memoryOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "memorySnapshot"
+    },
+    {
+      "owner": "humanReviewGate",
+      "name": "reviewIn",
+      "direction": "in",
+      "data_type": "String",
+      "signal": "verificationReport"
+    },
+    {
+      "owner": "humanReviewGate",
+      "name": "reviewOut",
+      "direction": "out",
+      "data_type": "String",
+      "signal": "reviewDecision"
+    }
+  ],
+  "messages": [
+    {
+      "name": "verificationFailedMessage",
+      "signal": "SigVerificationFailed",
+      "from": "verifier",
+      "to": "repairManager"
+    },
+    {
+      "name": "ambiguityQuestionMessage",
+      "signal": "SigAmbiguityDetected",
+      "from": "classifier",
+      "to": "humanReviewGate"
+    },
+    {
+      "name": "reviewDecisionMessage",
+      "signal": "SigHumanApproved",
+      "from": "humanReviewGate",
+      "to": "controller"
+    }
+  ],
+  "states": [
+    {
+      "name": "idle"
+    },
+    {
+      "name": "parsed"
+    },
+    {
+      "name": "classified"
+    },
+    {
+      "name": "formalized"
+    },
+    {
+      "name": "verified"
+    },
+    {
+      "name": "repairing"
+    },
+    {
+      "name": "awaitingClarification"
+    },
+    {
+      "name": "pendingHumanReview"
+    },
+    {
+      "name": "baselined"
+    }
+  ],
+  "transitions": [
+    {
+      "name": "startParse",
+      "from": "idle",
+      "trigger": "SigStart",
+      "to": "parsed"
+    },
+    {
+      "name": "classifyIntent",
+      "from": "parsed",
+      "trigger": "SigClassify",
+      "to": "classified"
+    },
+    {
+      "name": "formalizeIntent",
+      "from": "classified",
+      "trigger": "SigFormalize",
+      "to": "formalized"
+    },
+    {
+      "name": "runVerification",
+      "from": "formalized",
+      "trigger": "SigVerify",
+      "to": "verified"
+    },
+    {
+      "name": "handleFailure",
+      "from": "verified",
+      "trigger": "SigVerificationFailed",
+      "to": "repairing"
+    },
+    {
+      "name": "repairComplete",
+      "from": "repairing",
+      "trigger": "SigRepairComplete",
+      "to": "formalized"
+    },
+    {
+      "name": "raiseAmbiguity",
+      "from": "classified",
+      "trigger": "SigAmbiguityDetected",
+      "to": "awaitingClarification"
+    },
+    {
+      "name": "resolveAmbiguity",
+      "from": "awaitingClarification",
+      "trigger": "SigClarificationProvided",
+      "to": "formalized"
+    },
+    {
+      "name": "requestReview",
+      "from": "verified",
+      "trigger": "SigReviewRequested",
+      "to": "pendingHumanReview"
+    },
+    {
+      "name": "approveBaseline",
+      "from": "pendingHumanReview",
+      "trigger": "SigHumanApproved",
+      "to": "baselined"
+    }
+  ],
+  "base_quantities": [
+    {
+      "owner": "controller",
+      "name": "retryBudget",
+      "type": "Integer",
+      "default": 3
+    },
+    {
+      "owner": "controller",
+      "name": "retryCount",
+      "type": "Integer",
+      "default": 0
+    },
+    {
+      "owner": "controller",
+      "name": "sessionMemoryScore",
+      "type": "Integer",
+      "default": 1
+    },
+    {
+      "owner": "controller",
+      "name": "projectMemoryScore",
+      "type": "Integer",
+      "default": 1
+    },
+    {
+      "owner": "controller",
+      "name": "humanReviewApproved",
+      "type": "Integer",
+      "default": 0
+    }
+  ],
+  "base_constraints": [
+    {
+      "owner": "controller",
+      "name": "retryBound",
+      "expr": "retryCount <= retryBudget"
+    },
+    {
+      "owner": "controller",
+      "name": "memoryNonNegative",
+      "expr": "sessionMemoryScore >= 0 & projectMemoryScore >= 0"
+    },
+    {
+      "owner": "controller",
+      "name": "reviewApprovalRange",
+      "expr": "humanReviewApproved >= 0 & humanReviewApproved <= 1"
+    }
+  ],
+  "requirement_map": {
+    "safety": "verifier",
+    "constraint": "formalizer",
+    "performance": "memoryManager",
+    "liveness": "controller",
+    "functional": "formalizer"
+  },
+  "connections": [
+    {
+      "from": "parser.parsedOut",
+      "to": "classifier.intentIn"
+    },
+    {
+      "from": "classifier.intentOut",
+      "to": "formalizer.formalIn"
+    },
+    {
+      "from": "formalizer.formalOut",
+      "to": "verifier.verifyIn"
+    },
+    {
+      "from": "verifier.verifyOut",
+      "to": "repairManager.repairIn"
+    },
+    {
+      "from": "repairManager.repairOut",
+      "to": "formalizer.formalIn"
+    },
+    {
+      "from": "verifier.verifyOut",
+      "to": "humanReviewGate.reviewIn"
+    }
+  ]
+}

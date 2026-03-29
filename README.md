@@ -1,342 +1,193 @@
 # Autoformalization MBSE Toolkit
 
-This project demonstrates an end‑to‑end Model‑Based Systems Engineering (MBSE) workflow that turns
-natural-language requirements into solver-backed artefacts. The Node pipeline ingests structured
-requirements, synthesises typed logical forms, emits SMT-LIB, and executes Z3 (native or WebAssembly).
-The Python toolkit complements this flow with automatic policy translation and SAT/UNSAT witness
-generation.
+This repository provides a Python-first pipeline for turning natural-language requirements into:
 
+- structured requirement representations,
+- typed logical representations,
+- validated SAT/UNSAT SMT-LIB artefacts,
+- SysML v2 outputs, and
+- traceability and run reports.
+
+Prototype caveat:
+- The currently validated prototype workflow is Codex-focused (`--llm-provider codex`).
+- Other provider paths should be treated as experimental at this stage.
+
+```text
+requirements.csv
+      |
+      v
+scripts/requirements_pipeline.py
+      |
+      +--> intent formalization -> <prefix>_intent.json
+      |                         -> <prefix>_intent_requirement_set.json
+      |
+      +--> translation + TLR    -> <prefix>_translate.json
+      |                         -> <prefix>_tlr.json
+      |
+      +--> SMT + Z3 validation  -> <prefix>_sat.smt2
+      |                         -> <prefix>_unsat.smt2
+      |                         -> <prefix>_semantic_checks.json
+      |
+      +--> SysML generation     -> <sysml-output> (domain/evidence/architecture)
 ```
-requirements.json  ─┐
-                    │ src/pipeline.js ─► logical form ─► SMT-LIB ─► Z3 result
-requirements.tx  ───┘                         ▲
-                                           scripts/openai_toolkit.py
-```
 
-The sections below describe every stage and point to the corresponding source files.
+## Primary Entry Points
 
----
+- `scripts/requirements_pipeline.py`: end-to-end translation + SMT validation + SysML generation.
+- `scripts/mbse_run.py`: wrapper around the pipeline with friendlier diagnosis and markdown reports.
+- `scripts/openai_toolkit.py`: compatibility shim that forwards to the unified pipeline entrypoint.
+- `scripts/mbse_toolkit_core.py`: legacy compatibility shim for older imports/CLI calls.
 
-## 1. Core Pipeline (Node.js)
+`requirements_pipeline.py` is the authoritative unified CLI surface. It accepts:
+- pipeline flags directly (existing behavior)
+- delegated toolkit commands: `translate`, `harvest`, `formalize_intent`
 
-### 1.1 CLI driver – `src/cli.js`
-- Argument parsing (`parseArgs` in `src/cli.js:12-38`) supports `--input`, `--output`, optional
-  `--model`, and `--skip-solver`.
-- Requirements are read from disk (`src/cli.js:44-49`), passed to `runPipeline`, and emitted as
-  `<id>.tlf.json`, `<id>.smt2`, and `<id>.solver.json` (`src/cli.js:58-70`).
+By default, pipeline mode now runs an intent-formalization pre-stage and then
+translates from the normalized `requirement_set`. Use `--skip-intent-formalization`
+to bypass this.
 
-Run it with `npm run pipeline:run -- --input examples/door-controller.json --output out`.
+Main demonstration CSV files used in this repo:
+- `examples/pure/eirene_fun7_harvest_requirements_top10.csv` (baseline set)
+- `examples/pure/eirene_fun7_harvest_requirements_top11.csv` (baseline + contradiction/ambiguity injection)
 
-### 1.2 Translation to typed logical form – `src/llm`
-- `runPipeline` (`src/pipeline.js:7-27`) drives the flow: translate → validate → canonicalise → emit
-  SMT → solve.
-- `translateRequirementsToLogicalForm` (`src/llm/translator.js:6-24`) builds a structured prompt and
-  calls the OpenAI API via `createChatCompletion` (`src/llm/openaiClient.js`), or returns canned
-  output from `src/llm/mockResponses.js` when `MOCK_LLM=1`.
-- Prompts (`src/llm/prompt.js`) embed assumptions, requirement IDs, and a JSON shape reminder to keep
-  the LLM honest.
-
-### 1.3 Schema enforcement – `src/tlf/schema.js`
-- `logicalFormSchema` (`src/tlf/schema.js:204-227`) uses Zod to ensure the LLM output contains
-  well-typed symbols and formula ASTs. Unsupported constructs throw before SMT generation.
-- Term variants (`src/tlf/schema.js:36-174`) cover identifiers, arithmetic, boolean connectives,
-  quantifiers, `let`, function/predicate calls, etc.
-
-### 1.4 Canonicalisation – `src/tlf/transformers.js`
-- `canonicaliseLogicalForm` (`src/tlf/transformers.js:73-88`) alphabetises symbol tables and applies
-  `deepSortTerm` (`src/tlf/transformers.js:5-70`) so the same logical form always generates the same
-  SMT-LIB—ideal for diffing and caching.
-
-### 1.5 SMT-LIB emission – `src/tlf/smtlibGenerator.js`
-- `logicalFormToSmtlib` (`src/tlf/smtlibGenerator.js:114-160`) converts the canonical logical form into
-  solver-ready SMT-LIB. Helpers such as `emitTerm` (`src/tlf/smtlibGenerator.js:11-78`) and
-  `emitEnumDecls` (`src/tlf/smtlibGenerator.js:82-90`) map each AST node into SMT syntax, attach
-  comments, and append `(check-sat)`/`(get-model)`.
-
-### 1.6 Solver execution – `src/solver/wasmSolver.js`
-- Preferred execution path wraps the native `z3` binary (`run_z3_fragment` in
-  `scripts/openai_toolkit.py:236-272` and `solveWithZ3` in `src/solver/wasmSolver.js:77-111`).
-- When `Z3_USE_WASM=1`, `locateZ3Module` (`src/solver/wasmSolver.js:16-49`) loads the Emscripten
-  bundle from `src/solver/vendor/`. `Module.locateFile` rewrites URLs so `z3.wasm` and
-  `z3.worker.cjs` resolve correctly.
-- If `SKIP_Z3=1`, the SMT string is returned but no solver is invoked.
-
-### 1.7 Outputs
-- `<output>/<id>.tlf.json` – canonical typed logical form ready for traceability.
-- `<output>/<id>.smt2` – solver-ready SMT program.
-- `<output>/<id>.solver.json` – solver result/diagnostics when Z3 runs.
-
-Sample files are available under `examples/` (input) and `out/` (generated output).
-
----
-
-## 2. Python Toolkit (`scripts/openai_toolkit.py`)
-
-### 2.1 `translate`
-- Accepts a plain-text policy (`--statement`).
-- Calls `generate_validated_smt_fragment` (`scripts/openai_toolkit.py:215-287`) which repeatedly
-  solicits SMT-LIB from the LLM, strips Markdown fences (`strip_code_fences` at
-  `scripts/openai_toolkit.py:67-79`), runs Z3 (`run_z3_fragment` at `scripts/openai_toolkit.py:191-213`),
-  and feeds solver feedback back into the prompt until the fragment is valid.
-- With `--write-smt-prefix out/policy`, `write_smt_outputs` (`scripts/openai_toolkit.py:289-323`)
-  writes `out/policy_sat.smt2` and `out/policy_unsat.smt2`, verifying both via Z3. The UNSAT variant
-  appends either `--unsat-extra` or the default `assert false` using `prepare_unsat_variant`
-  (`scripts/openai_toolkit.py:81-92`).
-- Results (original text, informal reasoning, clean SMT, solver iterations, file paths) are returned as
-  JSON; use `--output-json` or rely on the auto-generated `<prefix>_translate.json` when
-  `--write-smt-prefix` is supplied.
-
-Example:
+Canonical pipeline command format:
 
 ```bash
-OPENAI_API_KEY=sk-... python scripts/openai_toolkit.py translate \
-  --statement policy_charging.txt \
-  --write-smt-prefix out/policy_charging \
-  --output-json out/policy_charging_translate.json
+STATEMENT="${1:-examples/pure/eirene_fun7_harvest_requirements_top10.csv}"
+PREFIX="${2:-out/e2e_prod}"
+SYSML_OUT="${3:-out/e2e_prod_domain.sysml}"
+TRACE_OUT="${4:-out/e2e_prod_trace.sysml}"
 
-z3 out/policy_charging_sat.smt2     # sat
-z3 out/policy_charging_unsat.smt2   # unsat
+python3 scripts/requirements_pipeline.py \
+  --llm-provider codex \
+  --model gpt-5.4 \
+  --statement "$STATEMENT" \
+  --output-prefix "$PREFIX" \
+  --sysml-mode domain \
+  --sysml-output "$SYSML_OUT" \
+  --traceability-output "$TRACE_OUT" \
+  --require-intent-formalization \
+  --semantic-strict \
+  --skip-sysml-compile
 ```
 
-### 2.2 `harvest`
-- Splits long documents into manageable chunks (`chunk_text` at `scripts/openai_toolkit.py:48-66`).
-- Extracts structured requirements and assumptions with
-  `extract_requirements_from_chunk` (`scripts/openai_toolkit.py:137-182`).
-- Aggregates the chunks into a JSON payload that mirrors `examples/door-controller.json`, ideal for
-  `npm run pipeline:run`.
+## Quick Start
 
----
-
-## 3. Directory Reference
-
-| Path | Purpose |
-|------|---------|
-| `policy_charging.txt` | Example policy used in the toolkit walkthrough. |
-| `scripts/openai_toolkit.py` | Python CLI (translate & harvest commands). |
-| `src/cli.js` | Node CLI driver (see §1.1). |
-| `src/pipeline.js` | Orchestration of the translation/validation/generation/solve phases. |
-| `src/llm/` | Prompt building, OpenAI client, mock responses. |
-| `src/tlf/` | Typed logical form schema, canonicalisation, SMT generator. |
-| `src/solver/` | Native + WASM Z3 loader utilities. |
-| `tests/smtlibGenerator.test.js` | Node test validating SMT emission against the mock logical form. |
-
----
-
-## 4. Configuration
-
-| Variable | Effect |
-|----------|--------|
-| `OPENAI_API_KEY` | API token for all LLM calls (Node & Python). |
-| `OPENAI_BASE_URL` | Override the OpenAI-compatible base URL. |
-| `OPENAI_MODEL` | Default model used by the Node pipeline. |
-| `OPENAI_TRANSLATION_MODEL`, `OPENAI_HARVEST_MODEL` | Override models for toolkit commands. |
-| `MOCK_LLM` | When `1`, use canned logical forms. |
-| `SKIP_Z3` | Skip solver execution (still write SMT-LIB). |
-| `Z3_PATH` | Path to the native Z3 binary (default `z3`). |
-| `Z3_USE_WASM` | Force the pipeline to use the WASM bundle. |
-| `SMT_FIX_ATTEMPTS` | Max SMT refinement attempts in the toolkit (default `3`). |
-| `SMT_SOLVER_TIMEOUT` | Solver timeout in seconds for toolkit validation (default `10`). |
-
-Place `z3.js`, `z3.wasm`, and `z3.worker.cjs` under `src/solver/vendor/` to enable WebAssembly.
-
----
-
-## 5. Common Workflows
-
-| Task | Command |
-|------|---------|
-| Run the Node pipeline with real LLM | `OPENAI_API_KEY=sk-... npm run pipeline:run -- --input examples/door-controller.json --output out` |
-| Run the pipeline with the canned logical form | `MOCK_LLM=1 npm run pipeline:run -- --input examples/door-controller.json --output out` |
-| Translate a policy and emit SAT/UNSAT SMT files | `OPENAI_API_KEY=sk-... python scripts/openai_toolkit.py translate --statement policy_charging.txt --write-smt-prefix out/policy_charging --output-json out/policy_charging_translate.json` |
-| Harvest requirements from a long PDF/text | `OPENAI_API_KEY=sk-... python scripts/openai_toolkit.py harvest --source requirements.txt --set-id SYS --title "Target System" --system "Subsystem" > examples/harvested.json` |
-| Run the SMT generator test suite | `npm run pipeline:test` |
-| End-to-end requirements → SMT → SysML pipeline | `OPENAI_API_KEY=sk-... python scripts/requirements_pipeline.py --statement Requirements_examples/delivery_methods.txt --output-prefix out/delivery_methods --sysml-output SysML-v2-Release/sysml/DeliveryMethods.sysml` |
-
-## 6.1 SysML notebook launcher
-
-The project ships with `scripts/run_sysml_lab.sh`, a helper that activates the SysML Conda
-environment and launches Jupyter Lab with the SysML kernel preloaded.
+### 1. Run a production-style pipeline (Codex provider)
 
 ```bash
-# From the repo root
-./scripts/run_sysml_lab.sh
+python3 scripts/mbse_run.py \
+  --llm-provider codex \
+  --model gpt-5.4 \
+  --statement examples/pure/eirene_fun7_harvest_requirements_top11.csv \
+  --output-prefix out/eirene_fun7_top11 \
+  --sysml-mode domain \
+  --sysml-output out/EIRENE_FUN7_top11_domain.sysml \
+  --traceability-output out/EIRENE_FUN7_top11_trace.sysml \
+  --skip-sysml-compile
 ```
 
-The script defaults to the environment at `/home/balaji/miniconda3/envs/sysml-0.52.0` and opens the
-`SysML-v2-Release` folder as the notebook root. Override either value at runtime if needed:
+### 2. Run end-to-end directly
 
 ```bash
-SYSML_CONDA_ENV=/alternate/env/path \
-SYSML_NOTEBOOK_DIR=/path/to/notebooks \
-./scripts/run_sysml_lab.sh --port 8891 --no-browser
+python3 scripts/requirements_pipeline.py \
+  --llm-provider codex \
+  --model gpt-5.4 \
+  --statement examples/pure/eirene_fun7_harvest_requirements_top10.csv \
+  --output-prefix out/eirene_fun7_top10_codex \
+  --sysml-output out/EIRENE_FUN7_top10_codex.sysml \
+  --skip-sysml-compile
 ```
 
-Because the script finishes by `exec`-ing `jupyter lab`, any extra flags you pass are forwarded
-directly to Jupyter (e.g., `--ip`, `--NotebookApp.token=""`, etc.).
+## Input Support
 
----
+Prototype input contract (current stage):
+- `--statement` is expected to be a CSV requirements file (`.csv`).
+- Non-CSV inputs (`.pdf`, `.txt`, `.json`) are not supported at this stage.
+- Use the demonstration CSVs:
+  - `examples/pure/eirene_fun7_harvest_requirements_top10.csv`
+  - `examples/pure/eirene_fun7_harvest_requirements_top11.csv`
 
-## 6.2 Requirements → SMT → SysML pipeline
+- `openai_toolkit.py harvest` long-form document ingestion is work in progress; under the current CSV-only prototype contract, non-CSV sources are intentionally rejected.
+- `formalize_intent` can normalize requirement sets and produce formalization scaffolds.
 
-Use `scripts/requirements_pipeline.py` when you want a single command to translate a plain-text
-requirement, generate and validate the SAT/UNSAT SMT artefacts, and emit a SysML model that packages
-the results. By default it also loads the generated `.sysml` file with the SysML kernel to ensure the
-textual model compiles cleanly.
+## Output Artefacts
+
+Typical pipeline outputs include:
+
+- `<prefix>_translate.json`
+- `<prefix>_tlr.json`
+- `<prefix>_sat.smt2`
+- `<prefix>_unsat.smt2`
+- `<prefix>_run_report.md` (via `mbse_run.py`)
+- `<sysml-output>`
+- `<traceability-output>` (domain mode)
+
+## LLM Providers
+
+Two providers are supported:
+
+- `openai`: via OpenAI API key.
+- `codex`: via local `codex exec` CLI.
+
+Current prototype caveat:
+- For this repository stage, treat `codex` as the primary validated provider for end-to-end runs.
+- Expansion and hardening of additional providers is planned future work.
+
+Examples:
 
 ```bash
-OPENAI_API_KEY=sk-... \
-python scripts/requirements_pipeline.py \
-  --statement Requirements_examples/delivery_methods.txt \
-  --output-prefix out/delivery_methods \
-  --sysml-output SysML-v2-Release/sysml/DeliveryMethods.sysml
+python3 scripts/requirements_pipeline.py --llm-provider codex --model gpt-5.4 ...
 ```
 
-Key outputs:
-- `<prefix>_translate.json` – full translation payload.
-- `<prefix>_sat.smt2` and `<prefix>_unsat.smt2` – solver artefacts with validation results.
-- `<sysml-output>` – generated SysML package summarising the artefact lineage with dedicated context,
-  requirement, analysis, and view definitions.
+```bash
+OPENAI_API_KEY=sk-... python3 scripts/requirements_pipeline.py --llm-provider openai ...
+```
 
-Pass `--skip-sysml-compile` to write the SysML file without launching the Java kernel (useful if the
-kernel is not installed locally), `--model` to override the OpenAI model, or
-`--sysml-context prompt_contexts/sysml_requirement_template.sysml` to inject a modelling template
-snippet that guides the structure of the generated SysML package. The generated SysML docs now
-include explicit next-step instructions (e.g., add domain parts, refine constraints, extend views) so
-engineers know how to elaborate the scaffold into a full design.
+## Configuration
 
-## 6. Example Artefacts
+Common variables:
 
-Running the toolkit example above creates the following files under `out/`:
+- `OPENAI_API_KEY`: OpenAI credentials for provider `openai`.
+- `OPENAI_BASE_URL`: override OpenAI-compatible endpoint.
+- `MBSE_LLM_PROVIDER`: default provider (`openai` or `codex`).
+- `CODEX_MBSE_MODEL`: default Codex model (default `gpt-5.4`).
+- `CODEX_EXEC_TIMEOUT`: timeout (seconds) for `codex exec` calls.
+- `CODEX_REASONING_EFFORT`: `low|medium|high|xhigh`.
+- `SMT_FIX_ATTEMPTS`: retries for SMT correction loop.
+- `SMT_SOLVER_TIMEOUT`: solver timeout in seconds.
+- `Z3_PATH`: path to native Z3 binary.
+- `SYSML_KERNEL_JAR`: optional SysML kernel jar for compile validation.
 
-- `policy_charging_translate.json` – Original statement, informal reasoning, SMT fragments, solver
-  diagnostics, and file paths.
-- `policy_charging_sat.smt2` – Z3-verifiable SAT scenario (`z3 …` prints `sat`).
-- `policy_charging_unsat.smt2` – The same scenario with an injected contradiction (defaults to
-  `(assert false)`), yielding `unsat`.
+## TLR Contracts
 
-The Node pipeline produces analogous outputs for structured JSON requirements (e.g.,
-`door-controller.tlf.json`, `door-controller.smt2`, `door-controller.solver.json`).
+The toolkit distinguishes two schema contracts:
 
----
+- `requirements_tlr`: requirement-centric working representation.
+- `logical_form_tlr`: solver-facing representation.
 
-## 7. Development Notes
+See `scripts/tlr_contracts.py` for detection and conversions.
 
-- LLM calls are deterministic (`temperature=0`, `top_p=0.1`, `response_format=json_object`).
-- The toolkit strips Markdown fences before hitting Z3 and keeps every refinement attempt in
-  `smt_iterations` for debugging.
-- `tests/smtlibGenerator.test.js` ensures the SMT generator stays in sync with the mock logical form;
-  add additional tests as the schema expands.
-- When adding new term kinds, update `src/tlf/schema.js`, `src/tlf/transformers.js`, and
-  `src/tlf/smtlibGenerator.js` in tandem.
+## Testing
 
----
+Automated tests are intentionally deferred at this prototype stage while the core pipeline is being stabilized.
 
-## 8. License
+Future work (planned):
+- Add a focused integration suite for `requirements_pipeline.py` covering:
+  - `--sysml-mode domain`,
+  - `--sysml-mode architecture`,
+  - traceability output generation,
+  - semantic-strict SMT repair/validation scenarios.
+- Expand and harden non-Codex provider support.
+- Add a usability-focused user interface on top of the current CLI workflow.
 
-This project is released under the MIT License (see `LICENSE`).
+## Troubleshooting
 
----
+- `OPENAI_API_KEY is not set`: export key or switch to `--llm-provider codex`.
+- `codex exec failed`: ensure `codex` is installed/authenticated and network is available.
+- `Z3 timed out`: reduce fragment complexity, tighten prompts, or increase timeout.
+- SysML compile issues: use `--skip-sysml-compile` to keep generated artefacts while diagnosing.
 
-## 9. Detailed Execution Flow & Error Handling
+## License
 
-### 9.1 Event trace for `npm run pipeline:run`
-
-1. **CLI parsing** (`src/cli.js:12-38`) reads switches and resolves absolute paths.
-2. **Requirement ingestion** (`src/cli.js:44-49`) loads JSON and preserves it in memory.
-3. **Logical form synthesis** (`src/pipeline.js:12`) calls the LLM translator, which builds prompts
-   (`src/llm/prompt.js`) targeting the schema documented in `logicalFormShapeDescription`
-   (`src/tlf/schema.js:230-258`).
-4. **Validation** (`src/pipeline.js:13`) throws on schema mismatches. Errors bubble back to the CLI so
-   shell status codes remain non-zero.
-5. **Canonicalisation** (`src/pipeline.js:14`) ensures deterministic ordering; no-op if the logical
-   form is already consistent.
-6. **SMT-LIB emission** (`src/pipeline.js:15`) yields a single string. Comments include the originating
-   requirement IDs for traceability.
-7. **Solver invocation** (`src/pipeline.js:18-22`) chooses execution mode:
-   - Native (`Z3_PATH`): `solveWithZ3` spawns `z3 -in` and streams the SMT program through stdin.
-   - WASM (`Z3_USE_WASM=1`): `locateZ3Module` loads `src/solver/vendor/z3.js` and runs `Module.solve`.
-   - Skipped (`SKIP_Z3=1`): returns `{ status: "skipped" }` with a reason.
-8. **Artefact write-out** (`src/cli.js:62-70`) never discards intermediate files—even on solver errors—
-   so you can re-run the solver manually after corrections.
-
-### 9.2 Solver diagnostics
-
-- Native failures (`exit_code != 0` or any `stderr`) propagate through `solveWithZ3` and are written to
-  `<id>.solver.json`. Expect fields `status: "error"`, `error: <message>`, and any partial stdout.
-- WASM failures surface as thrown exceptions from the Emscripten module. These get wrapped into the
-  same structure by `solveWithZ3`.
-- Use `Z3_PATH` to point to alternate builds (e.g., a debug or nightly binary).
-
-### 9.3 Toolkit retry logic
-
-- Each iteration (`smt_iterations[i]`) records:
-  - `raw_fragment` – verbatim LLM response.
-  - `clean_fragment` – fence-free version sent to Z3.
-  - `validation` – Z3 status/diagnostics for that attempt.
-- If all attempts fail, the final JSON emphasises the last error. You can adjust the policy text, pass
-  `--unsat-extra` for custom contradictions, or bump `SMT_FIX_ATTEMPTS`/`SMT_SOLVER_TIMEOUT`.
-- When the solver responds `unknown`, consider tightening the prompt (e.g., “avoid quantifiers”) or
-  building a bounded horizon manually.
-
----
-
-## 10. Customising Prompts & Logical Form Schema
-
-- **Prompt templates** (`src/llm/prompt.js`) can be tailored to your domain: add new instruction lines
-  or augment the schema reminder. Ensure corresponding schema changes are made in
-  `src/tlf/schema.js`.
-- **Schema extensions**: add new term variants to the discriminated union in `schema.js`, extend
-  `deepSortTerm` so canonicalisation handles the new shape, and update `emitTerm` in
-  `smtlibGenerator.js` to produce correct SMT.
-- **Toolkit generation hints**: the translate command’s prompt includes instructions such as “Use a
-  small bounded horizon” and “avoid quantifiers”. Tweak those strings inside
-  `generate_smt_skeleton` (`scripts/openai_toolkit.py:120-146`) to suit your modelling needs.
-
----
-
-## 11. Native vs WASM Z3
-
-- **Native path**: lower latency, full feature set, no need for the WASM bundle. Ensure `Z3_PATH`
-  points to a local executable (default `z3`).
-- **WASM path**: convenient when distributing a self-contained package or running in environments
-  without a native binary. Place `z3.js`, `z3.wasm`, `z3.worker.cjs` under `src/solver/vendor/`.
-  `locateZ3Module` injects a global `Module.locateFile` so dependent files load correctly.
-- **Fallback behaviour**: if the WASM bundle is missing and `Z3_USE_WASM=1`, the solver stage produces
-  `{ status: 'skipped', reason: 'Z3 wasm bundle unavailable.' }` and the CLI reports the skip.
-
----
-
-## 12. Testing & Continuous Validation
-
-- **Unit tests**: `npm run pipeline:test` executes `tests/smtlibGenerator.test.js`. Expand the suite to
-  cover new schema constructs or solver behaviours.
-- **Manual smoke tests**:
-  1. `npm run pipeline:run -- --input examples/door-controller.json --output out`
-  2. `python scripts/openai_toolkit.py translate --statement policy_charging.txt --write-smt-prefix out/policy_charging`
-  3. `z3 out/policy_charging_sat.smt2`, `z3 out/policy_charging_unsat.smt2`
-- **Regeneration checks**: because canonicalisation enforces deterministic output, re-running the
-  pipeline should produce identical SMT strings for unchanged inputs.
-
----
-
-## 13. Troubleshooting
-
-| Symptom | Likely Cause | Resolution |
-|---------|--------------|-----------|
-| `OPENAI_API_KEY is not set` | Environment not configured | `export OPENAI_API_KEY=...` or populate `.env`. |
-| `LLM call failed with status …` | Network/auth issue | Verify key, model name, and base URL. |
-| `Z3 timed out after … seconds` | Solver stuck in undecidable fragment | Tighten prompt (avoid quantifiers), increase timeout, or reduce model horizon. |
-| `MODULE_NOT_FOUND z3.worker.js` | WASM bundle incomplete | Rename the worker to `z3.worker.cjs` and ensure `z3.js/z3.wasm` coexist. |
-| Toolkit emits malformed SMT | Inspect `smt_iterations` → `raw_fragment` for prompt adjustments; consider adding guardrails in `generate_smt_skeleton`. |
-
----
-
-## 14. Glossary
-
-- **TLF (Typed Logical Form)** – Structured, typed representation of requirements used as an
-  intermediate artefact before SMT generation.
-- **SMT-LIB** – Standard language for SMT solvers such as Z3.
-- **SAT / UNSAT** – Solver verdict indicating whether the constraints have a satisfying assignment or
-  are contradictory.
-- **MBSE** – Model-Based Systems Engineering, emphasising formal system models alongside textual
-  documentation.
+MIT (see `LICENSE`).

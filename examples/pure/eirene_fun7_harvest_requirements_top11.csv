@@ -1,0 +1,12 @@
+id,requirement
+EIRENE_FUN7-R001,The GSM-R network shall provide voice communication services for railway operations.
+EIRENE_FUN7-R002,The GSM-R network shall provide data communication services for railway operations.
+EIRENE_FUN7-R003,"The GSM-R network shall support call-related services needed to establish, manage, and terminate communications."
+EIRENE_FUN7-R004,The GSM-R network shall provide railway-specific communication services in addition to general telecommunications services.
+EIRENE_FUN7-R005,The GSM-R network specification shall define a verifiable call set-up time requirement for the communication system.
+EIRENE_FUN7-R006,The system shall support broadcast calls addressed to all members of a pre-defined group within a local geographical area.
+EIRENE_FUN7-R007,"During a broadcast call, the system shall permit voice transmission only from the call initiator and shall prevent all other group members from transmitting while allowing them to receive the call audio."
+EIRENE_FUN7-R008,The cab radio shall provide radio communication capability through interfaces installed in the cab of a locomotive for principal use by the locomotive driver.
+EIRENE_FUN7-R009,"If the cab radio supports train control, the cab radio shall include the interfaces required to support train-control communications in addition to driver radio communications."
+EIRENE_FUN7-R010,"During a broadcast call, any group member shall be able to transmit voice data to all other members of the group."
+EIRENE_FUN7-R011,The GSM-R network shall ensure adequate quality of service for all supported communication modes under normal operating conditions.
