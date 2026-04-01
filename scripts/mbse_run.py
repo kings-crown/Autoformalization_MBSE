@@ -43,7 +43,18 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespac
     parser.add_argument("--skip-sysml-compile", action="store_true")
     parser.add_argument("--require-sysml-compile", action="store_true")
     parser.add_argument("--timeout", type=float)
+    parser.add_argument("--semantic-strict", action="store_true",
+                        help="Fail the pipeline if semantic checks do not pass.")
+    parser.add_argument("--approve-weakened", action="store_true",
+                        help="Allow repairs that weaken or temporally shift requirement encodings.")
 
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        help=(
+            "Place all artefacts under this directory. A CSV-named sub-folder"
+        ),
+    )
     parser.add_argument(
         "--report-path",
         type=Path,
@@ -109,6 +120,10 @@ def _build_pipeline_cmd(args: argparse.Namespace, passthrough: Sequence[str]) ->
         cmd.append("--require-sysml-compile")
     if args.timeout is not None:
         cmd.extend(["--timeout", str(args.timeout)])
+    if args.semantic_strict:
+        cmd.append("--semantic-strict")
+    if args.approve_weakened:
+        cmd.append("--approve-weakened")
     cmd.extend(list(passthrough))
     return cmd
 
@@ -258,6 +273,175 @@ def diagnose_failure(raw_log: str, smt_snapshot: Dict[str, Dict[str, str]]) -> F
     )
 
 
+def _load_semantic_checks(output_prefix: Path) -> Optional[Dict[str, Any]]:
+    """Load the ``_semantic_checks.json`` artefact emitted by the pipeline."""
+    base = output_prefix.with_suffix("") if output_prefix.suffix else output_prefix
+    path = base.with_name(f"{base.name}_semantic_checks.json")
+    return _load_json(path)
+
+
+def _status_label(value: Any) -> str:
+    if value is True:
+        return "pass"
+    if value is False:
+        return "fail"
+    return "n/a"
+
+
+def _append_limited(lines: List[str], items: List[str], limit: int = 10) -> None:
+    for item in items[:limit]:
+        lines.append(f"  - {item}")
+    if len(items) > limit:
+        lines.append(f"  - ... and {len(items) - limit} more")
+
+
+def _format_semantic_checks_section(sc: Dict[str, Any]) -> List[str]:
+    """Return markdown lines summarising the semantic check results."""
+    checks_obj = sc.get("checks")
+    checks = checks_obj if isinstance(checks_obj, dict) else sc
+    lines: List[str] = [
+        "",
+        "## Semantic Checks",
+        "",
+        f"- Passed: `{sc.get('passed', 'n/a')}`",
+        f"- Repaired: `{sc.get('repaired', False)}`",
+        f"- Repair exhausted: `{sc.get('repair_exhausted', False)}`",
+        f"- Blocked on weakened: `{sc.get('blocked_on_weakened', False)}`",
+        f"- Approve weakened: `{sc.get('approve_weakened', False)}`",
+    ]
+
+    named = checks.get("named_assertion_coverage")
+    if isinstance(named, dict):
+        lines.append(f"- named_assertion_coverage: `{_status_label(named.get('passed'))}`")
+        details: List[str] = []
+        missing = named.get("missing")
+        if isinstance(missing, list):
+            details.extend([f"missing named assertion: {rid}" for rid in missing])
+        unexpected = named.get("unexpected")
+        if isinstance(unexpected, list):
+            details.extend([f"unexpected named assertion: {rid}" for rid in unexpected])
+        _append_limited(lines, details)
+
+    same_state = checks.get("same_state")
+    if isinstance(same_state, dict):
+        lines.append(f"- same_state: `{_status_label(same_state.get('passed'))}`")
+        details = [
+            str(issue.get("message", "")).strip()
+            for issue in same_state.get("issues", [])
+            if isinstance(issue, dict) and str(issue.get("message", "")).strip()
+        ]
+        _append_limited(lines, details)
+
+    pairwise = checks.get("pairwise_conflict")
+    if not isinstance(pairwise, dict):
+        pairwise = checks.get("pairwise_conflicts")
+    if isinstance(pairwise, dict):
+        lines.append(f"- pairwise_conflict: `{_status_label(pairwise.get('passed'))}`")
+        details = []
+        if pairwise.get("skipped"):
+            reason = str(pairwise.get("reason", "pairwise checks skipped")).strip()
+            details.append(reason)
+        for conflict in pairwise.get("conflicts", []):
+            if isinstance(conflict, dict):
+                msg = str(conflict.get("message", "")).strip()
+                if msg:
+                    details.append(msg)
+        for probe in pairwise.get("solver_errors", []):
+            if isinstance(probe, dict):
+                msg = str(probe.get("message", "")).strip()
+                if msg:
+                    details.append(msg)
+        _append_limited(lines, details)
+
+    vacuity = checks.get("vacuity")
+    if isinstance(vacuity, dict):
+        lines.append(f"- vacuity: `{_status_label(vacuity.get('passed'))}`")
+        details = []
+        for key in ("vacuous_requirements", "tautological_antecedents", "solver_errors"):
+            entries = vacuity.get(key, [])
+            if isinstance(entries, list):
+                for item in entries:
+                    if isinstance(item, dict):
+                        msg = str(item.get("message", "")).strip()
+                        if msg:
+                            details.append(msg)
+        _append_limited(lines, details)
+
+    symbol_drift = checks.get("symbol_drift")
+    if isinstance(symbol_drift, dict):
+        lines.append(f"- symbol_drift: `{_status_label(symbol_drift.get('passed'))}`")
+        unknown = symbol_drift.get("unknown_symbols", [])
+        if isinstance(unknown, list):
+            details = [f"unknown symbol: {sym}" for sym in unknown]
+            _append_limited(lines, details)
+
+    return lines
+
+
+def _format_repair_diff_section(sc: Dict[str, Any]) -> List[str]:
+    """Return markdown lines for the repair diff classification table."""
+    repair_diff = sc.get("repair_diff")
+    if not isinstance(repair_diff, list) or not repair_diff:
+        return []
+
+    lines: List[str] = [
+        "",
+        "## Repair Diff",
+        "",
+        "| Requirement | Classification | Reason |",
+        "|-------------|---------------|--------|",
+    ]
+    for entry in repair_diff:
+        rid = entry.get("requirement_id", "?")
+        cls = entry.get("classification", "?")
+        reason = entry.get("reason", "")
+        lines.append(f"| {rid} | `{cls}` | {reason} |")
+
+    return lines
+
+
+def _has_dangerous_repairs(sc: Optional[Dict[str, Any]]) -> bool:
+    """Return True if any repair was classified as weakened or temporal_shifted."""
+    if not sc:
+        return False
+    repair_diff = sc.get("repair_diff")
+    if not isinstance(repair_diff, list):
+        return False
+    return any(
+        entry.get("classification") in ("weakened", "temporal_shifted")
+        for entry in repair_diff
+    )
+
+
+def _safe_run_label_from_statement(statement: Path) -> str:
+    stem = statement.stem.strip() or "run"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return safe or "run"
+
+
+def _next_available_run_dir(base_dir: Path, label: str) -> Path:
+    candidate = base_dir / f"run_{label}"
+    index = 1
+    while candidate.exists():
+        candidate = base_dir / f"run_{label}_{index}"
+        index += 1
+    return candidate
+
+
+def _relocate_into_run_dir(args: argparse.Namespace) -> Path:
+    """Create a CSV-named subdirectory under ``--run-dir`` and rewrite output paths."""
+    label = _safe_run_label_from_statement(args.statement)
+    run_dir = _next_available_run_dir(args.run_dir, label)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    args.output_prefix = run_dir / args.output_prefix.name
+    args.sysml_output = run_dir / args.sysml_output.name
+    if args.traceability_output:
+        args.traceability_output = run_dir / args.traceability_output.name
+    if not args.report_path:
+        args.report_path = run_dir / _default_report_path(args.output_prefix).name
+    return run_dir
+
+
 def _default_report_path(output_prefix: Path) -> Path:
     return output_prefix.with_name(f"{output_prefix.name}_run_report.md")
 
@@ -272,6 +456,7 @@ def build_report_markdown(
     smt_snapshot: Dict[str, Dict[str, str]],
     diagnosis: Optional[FailureDiagnosis],
     raw_log: str,
+    semantic_checks: Optional[Dict[str, Any]] = None,
 ) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     status = "success" if return_code == 0 else "failure"
@@ -317,6 +502,10 @@ def build_report_markdown(
         for step in diagnosis.next_steps:
             lines.append(f"1. {step}")
 
+    if semantic_checks:
+        lines.extend(_format_semantic_checks_section(semantic_checks))
+        lines.extend(_format_repair_diff_section(semantic_checks))
+
     excerpt_lines = [line for line in raw_log.splitlines() if line.strip()]
     if excerpt_lines:
         excerpt_title = "Error Excerpt" if return_code != 0 else "Run Log Excerpt"
@@ -330,6 +519,11 @@ def build_report_markdown(
 
 def main() -> None:
     args, passthrough = _parse_args()
+
+    run_dir: Optional[Path] = None
+    if args.run_dir:
+        run_dir = _relocate_into_run_dir(args)
+
     cmd = _build_pipeline_cmd(args, passthrough)
     env = _apply_env_overrides(args)
 
@@ -341,7 +535,18 @@ def main() -> None:
     )
 
     artefacts = _parse_artefacts_from_stdout(completed.stdout)
-    translate_path = Path(artefacts.get("translate_json", _expected_translate_path(args.output_prefix)))
+
+    effective_prefix = args.output_prefix
+    if "translate_json" in artefacts:
+        tj = Path(artefacts["translate_json"])
+        # translate_json is <prefix>_translate.json — strip the suffix to recover the prefix
+        stem = tj.name
+        if stem.endswith("_translate.json"):
+            effective_prefix = tj.parent / stem[: -len("_translate.json")]
+    elif "run_dir" in artefacts:
+        effective_prefix = Path(artefacts["run_dir"]) / args.output_prefix.name
+
+    translate_path = Path(artefacts.get("translate_json", _expected_translate_path(effective_prefix)))
     translate_payload = _load_json(translate_path)
     smt_snapshot = _smt_snapshot_from_translate_payload(translate_payload)
 
@@ -350,7 +555,14 @@ def main() -> None:
     if completed.returncode != 0:
         diagnosis = diagnose_failure(raw_log, smt_snapshot)
 
-    report_path = args.report_path or _default_report_path(args.output_prefix)
+    semantic_checks_data: Optional[Dict[str, Any]] = None
+    sc_artefact = artefacts.get("semantic_checks_json")
+    if sc_artefact and sc_artefact != "not_generated":
+        semantic_checks_data = _load_json(Path(sc_artefact))
+    if semantic_checks_data is None:
+        semantic_checks_data = _load_semantic_checks(effective_prefix)
+
+    report_path = args.report_path or _default_report_path(effective_prefix)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_text = build_report_markdown(
         args=args,
@@ -361,11 +573,24 @@ def main() -> None:
         smt_snapshot=smt_snapshot,
         diagnosis=diagnosis,
         raw_log=raw_log,
+        semantic_checks=semantic_checks_data,
     )
     report_path.write_text(report_text, encoding="utf-8")
 
+    # --- Semantic gate: block on dangerous repairs unless explicitly approved ---
+    if completed.returncode == 0 and _has_dangerous_repairs(semantic_checks_data) and not args.approve_weakened:
+        print("Pipeline completed but semantic gate BLOCKED the result.")
+        print("Repair introduced weakened or temporally-shifted requirement encodings.")
+        print("Re-run with --approve-weakened to accept, or inspect the report.")
+        print(f"Friendly report: {report_path}")
+        raise SystemExit(2)
+
     if completed.returncode == 0:
         print("Pipeline run succeeded.")
+        if run_dir is not None:
+            print(f"Run directory: {run_dir}")
+        elif "run_dir" in artefacts:
+            print(f"Run directory: {artefacts['run_dir']}")
         print(f"Friendly report: {report_path}")
         if artefacts:
             print("Key artefacts:")

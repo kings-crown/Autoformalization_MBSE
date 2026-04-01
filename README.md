@@ -38,6 +38,11 @@ scripts/requirements_pipeline.py
 - `scripts/openai_toolkit.py`: compatibility shim that forwards to the unified pipeline entrypoint.
 - `scripts/mbse_toolkit_core.py`: legacy compatibility shim for older imports/CLI calls.
 
+Common `scripts/mbse_run.py` wrapper flags:
+- `--run-dir <path>`: place all artefacts into a CSV-named run folder (for example `run_eirene_fun7_harvest_requirements_top11`), with `_N` suffixing if it already exists.
+- `--semantic-strict`: forward semantic strictness to `requirements_pipeline.py` and fail on semantic check failures.
+- `--approve-weakened`: allow runs whose repair diff includes `weakened` or `temporal_shifted` classifications.
+
 `requirements_pipeline.py` is the authoritative unified CLI surface. It accepts:
 - pipeline flags directly (existing behavior)
 - delegated toolkit commands: `translate`, `harvest`, `formalize_intent`
@@ -84,8 +89,11 @@ python3 scripts/mbse_run.py \
   --sysml-mode domain \
   --sysml-output out/EIRENE_FUN7_top11_domain.sysml \
   --traceability-output out/EIRENE_FUN7_top11_trace.sysml \
+  --run-dir out/ \
   --skip-sysml-compile
 ```
+
+This creates a run folder such as `out/run_eirene_fun7_harvest_requirements_top11/` and writes generated artefacts there. If that folder already exists, the run is written to `..._1`, `..._2`, and so on.
 
 ### 2. Run end-to-end directly
 
@@ -96,8 +104,11 @@ python3 scripts/requirements_pipeline.py \
   --statement examples/pure/eirene_fun7_harvest_requirements_top10.csv \
   --output-prefix out/eirene_fun7_top10_codex \
   --sysml-output out/EIRENE_FUN7_top10_codex.sysml \
+  --run-dir out/runs \
   --skip-sysml-compile
 ```
+
+Note: `--run-dir` is supported by both `scripts/mbse_run.py` and `scripts/requirements_pipeline.py`.
 
 ## Input Support
 
@@ -115,13 +126,39 @@ Prototype input contract (current stage):
 
 Typical pipeline outputs include:
 
-- `<prefix>_translate.json`
-- `<prefix>_tlr.json`
-- `<prefix>_sat.smt2`
-- `<prefix>_unsat.smt2`
-- `<prefix>_run_report.md` (via `mbse_run.py`)
-- `<sysml-output>`
-- `<traceability-output>` (domain mode)
+- `<prefix>_intent.json`: intent-formalization payload (normalization metadata + proposed requirement set); omitted with `--skip-intent-formalization`.
+- `<prefix>_intent_requirement_set.json`: extracted normalized requirement set used as translation input when intent formalization succeeds.
+- `<prefix>_translate.json`: primary translation artefact; includes informal statements/proof, typed forms, SMT artefact references, and solver validation metadata.
+- `<prefix>_tlr.json`: typed logical/requirements representation used for traceability and semantic checking.
+- `<prefix>_sat.smt2`: SAT-target SMT-LIB fragment encoding the requirement conjunction.
+- `<prefix>_unsat.smt2`: UNSAT-target SMT-LIB variant used as a negative check.
+- `<prefix>_semantic_checks.json`: semantic verification results (coverage/same-state/pairwise/vacuity/symbol drift) plus repair metadata and diffs when repairs occur.
+- `<prefix>_domain_ir.json`: Domain IR used to synthesize SysML structure/behavior (`domain` and `architecture` modes).
+- `<prefix>_traceability_ir.json`: traceability IR linking requirements to generated model elements (`domain` mode).
+- `<sysml-output>`: generated primary SysML model.
+- `<traceability-output>`: generated traceability SysML module (`domain` mode).
+- `<prefix>_run_report.md` (via `mbse_run.py`): wrapper markdown report with status, diagnosis, artefact index, semantic summary, and repair-diff table.
+
+When running `requirements_pipeline.py --run-dir <path>`, outputs are relocated into a CSV-named folder:
+
+```text
+<path>/run_<csv-stem>[_N]/
+  <prefix>_translate.json
+  <prefix>_semantic_checks.json
+  <prefix>_tlr.json
+  <prefix>_sat.smt2
+  <prefix>_unsat.smt2
+  <sysml-output>
+  <traceability-output>   # domain mode
+```
+
+When running `mbse_run.py --run-dir <path>`, the same folder layout is used and `<prefix>_run_report.md` is added.
+
+The wrapper run report includes semantic summaries (`## Semantic Checks`) and repair classification details (`## Repair Diff`) when semantic artefacts are present.
+
+Dangerous repair gating:
+- `requirements_pipeline.py` blocks if repair diff contains `weakened` or `temporal_shifted` classifications, unless `--approve-weakened` is passed.
+- `mbse_run.py` applies an additional post-run guard and may return exit code `2` if a successful subprocess result still contains dangerous repair diffs without approval.
 
 ## LLM Providers
 
@@ -187,6 +224,9 @@ Future work (planned):
 - `codex exec failed`: ensure `codex` is installed/authenticated and network is available.
 - `Z3 timed out`: reduce fragment complexity, tighten prompts, or increase timeout.
 - SysML compile issues: use `--skip-sysml-compile` to keep generated artefacts while diagnosing.
+- `--skip-sysml-compile: command not found`: the previous line in your multi-line shell command is missing a trailing `\`, so the flag was executed as a standalone shell command.
+- Pipeline error `Repair introduced weakened or temporally shifted requirement encodings`: rerun with `--approve-weakened` only if the weakening is intentionally accepted.
+- Wrapper exits with code `2`: post-run semantic guard blocked a successful subprocess result with dangerous repair diff entries. Inspect `<prefix>_run_report.md` (`## Repair Diff`) and rerun with `--approve-weakened` only if intentionally accepted.
 
 ## License
 

@@ -2087,6 +2087,78 @@ def _collect_failed_ids(semantic_results: Dict[str, Any]) -> List[str]:
     return sorted(failed)
 
 
+def classify_repair_diff(
+    original_fragment: str,
+    repaired_fragment: str,
+    requirement_ids: List[str],
+) -> List[Dict[str, str]]:
+    """Compare original and repaired SMT fragments, classifying each change.
+
+    Returns a list of per-requirement diffs with classification:
+      - ``strengthened`` — repair added constraints (fewer models). Safe.
+      - ``weakened`` — repair relaxed constraints (more models). Dangerous.
+      - ``temporal_shifted`` — repair moved requirement to a different state step.
+      - ``unchanged`` — formula identical.
+    """
+    orig_named = _extract_named_assertions(original_fragment)
+    new_named = _extract_named_assertions(repaired_fragment)
+    diffs: List[Dict[str, str]] = []
+    for rid in requirement_ids:
+        sid = _sanitize_req_id(rid)
+        orig_formula = orig_named.get(sid, "")
+        new_formula = new_named.get(sid, "")
+        if orig_formula == new_formula:
+            diffs.append({"requirement_id": rid, "classification": "unchanged"})
+            continue
+        if not orig_formula and new_formula:
+            diffs.append({
+                "requirement_id": rid,
+                "classification": "strengthened",
+                "reason": "Named assertion added where none existed.",
+            })
+            continue
+        if orig_formula and not new_formula:
+            diffs.append({
+                "requirement_id": rid,
+                "classification": "weakened",
+                "reason": "Named assertion removed entirely.",
+            })
+            continue
+        # Check for temporal shift: state suffixes changed.
+        orig_suffixes = _extract_state_suffixes(orig_formula)
+        new_suffixes = _extract_state_suffixes(new_formula)
+        if orig_suffixes != new_suffixes and orig_suffixes and new_suffixes:
+            diffs.append({
+                "requirement_id": rid,
+                "classification": "temporal_shifted",
+                "reason": f"State steps changed: {sorted(orig_suffixes)} → {sorted(new_suffixes)}",
+                "original": orig_formula,
+                "repaired": new_formula,
+            })
+            continue
+        # Heuristic: if the new formula is strictly shorter, likely weakened.
+        # If longer or has more conjuncts, likely strengthened.
+        orig_conjuncts = orig_formula.count("(and") + orig_formula.count("(=>")
+        new_conjuncts = new_formula.count("(and") + new_formula.count("(=>")
+        if new_conjuncts < orig_conjuncts or len(new_formula) < len(orig_formula) * 0.8:
+            classification = "weakened"
+            reason = "Formula has fewer constraints or is significantly shorter."
+        elif new_conjuncts > orig_conjuncts or len(new_formula) > len(orig_formula) * 1.2:
+            classification = "strengthened"
+            reason = "Formula has more constraints or is significantly longer."
+        else:
+            classification = "modified"
+            reason = "Formula changed but direction unclear."
+        diffs.append({
+            "requirement_id": rid,
+            "classification": classification,
+            "reason": reason,
+            "original": orig_formula,
+            "repaired": new_formula,
+        })
+    return diffs
+
+
 async def repair_failed_requirements(
     sat_fragment: str,
     semantic_results: Dict[str, Any],
@@ -3008,6 +3080,18 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--semantic-strict",
         action="store_true",
         help="Fail the run when semantic SMT checks detect requirement-level issues.",
+    )
+    parser.add_argument(
+        "--approve-weakened",
+        action="store_true",
+        help="Allow the repair loop to weaken or temporally shift requirement encodings without blocking.",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        help=(
+            "Collect all output artefacts under a CSV-named subdirectory "
+        ),
     )
     return parser.parse_args(argv)
 
@@ -5879,9 +5963,38 @@ def _compile_with_sysml_kernel(
     )
 
 
+def _safe_run_label_from_statement(statement: Path) -> str:
+    stem = statement.stem.strip() or "run"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return safe or "run"
+
+
+def _next_available_run_dir(base_dir: Path, label: str) -> Path:
+    candidate = base_dir / f"run_{label}"
+    index = 1
+    while candidate.exists():
+        candidate = base_dir / f"run_{label}_{index}"
+        index += 1
+    return candidate
+
+
+def _apply_run_dir(args: argparse.Namespace) -> Optional[Path]:
+    if not args.run_dir:
+        return None
+    label = _safe_run_label_from_statement(args.statement)
+    run_dir = _next_available_run_dir(args.run_dir, label)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    args.output_prefix = run_dir / args.output_prefix.name
+    args.sysml_output = run_dir / args.sysml_output.name
+    if args.traceability_output:
+        args.traceability_output = run_dir / args.traceability_output.name
+    return run_dir
+
+
 async def _run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     if not args.statement.exists():
         raise RuntimeError(f"File not found: {args.statement}")
+    run_dir = _apply_run_dir(args)
     output_prefix = args.output_prefix
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     result_json_path = output_prefix.with_suffix("") if output_prefix.suffix else output_prefix
@@ -6007,6 +6120,68 @@ async def _run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     with result_json_path.open("w", encoding="utf-8") as handle:
         json.dump(translate_payload, handle, indent=2)
 
+    repair_iterations: List[Dict[str, Any]] = []
+    repair_diff: List[Dict[str, str]] = []
+    dangerous_repair_diff: List[Dict[str, str]] = []
+    original_sat_fragment = sat_fragment_text
+    if not semantic_checks.get("passed", False) and SMT_MAX_SEMANTIC_REPAIRS > 0:
+        repaired_fragment, repaired_results, repair_iterations = await repair_failed_requirements(
+            sat_fragment=sat_fragment_text,
+            semantic_results=semantic_checks,
+            extended_statement=translate_payload.get("informal_statement", ""),
+            informal_proof=translate_payload.get("informal_proof", ""),
+            requirement_ids=requirement_ids,
+            tlf_payload=tlf_for_semantic,
+            model=args.model,
+            provider=args.llm_provider,
+        )
+        repair_diff = classify_repair_diff(original_sat_fragment, repaired_fragment, requirement_ids)
+        dangerous_repair_diff = [
+            entry
+            for entry in repair_diff
+            if entry.get("classification") in {"weakened", "temporal_shifted"}
+        ]
+        if repaired_results.get("passed", False):
+            sat_path.write_text(repaired_fragment, encoding="utf-8")
+            sat_fragment_text = repaired_fragment
+            semantic_checks = repaired_results
+            semantic_checks["repaired"] = True
+            semantic_checks["repair_iterations"] = repair_iterations
+            semantic_checks["repair_diff"] = repair_diff
+            semantic_checks["dangerous_repair_diff"] = dangerous_repair_diff
+            semantic_checks["dangerous_repair_count"] = len(dangerous_repair_diff)
+            semantic_checks["approve_weakened"] = bool(args.approve_weakened)
+            semantic_checks["blocked_on_weakened"] = False
+            semantic_checks_path = output_prefix.with_name(f"{output_prefix.name}_semantic_checks.json")
+            _write_json_artifact(semantic_checks_path, semantic_checks)
+            translate_payload["semantic_checks"] = semantic_checks
+            translate_payload["semantic_ok"] = True
+            with result_json_path.open("w", encoding="utf-8") as handle:
+                json.dump(translate_payload, handle, indent=2)
+        else:
+            semantic_checks["repair_iterations"] = repair_iterations
+            semantic_checks["repair_exhausted"] = True
+            semantic_checks["repair_diff"] = repair_diff
+            semantic_checks["dangerous_repair_diff"] = dangerous_repair_diff
+            semantic_checks["dangerous_repair_count"] = len(dangerous_repair_diff)
+            semantic_checks["approve_weakened"] = bool(args.approve_weakened)
+            semantic_checks["blocked_on_weakened"] = False
+            _write_json_artifact(semantic_checks_path, semantic_checks)
+
+    if dangerous_repair_diff and not args.approve_weakened:
+        semantic_checks["blocked_on_weakened"] = True
+        semantic_checks["approve_weakened"] = False
+        _write_json_artifact(semantic_checks_path, semantic_checks)
+        translate_payload["semantic_checks"] = semantic_checks
+        translate_payload["semantic_ok"] = False
+        with result_json_path.open("w", encoding="utf-8") as handle:
+            json.dump(translate_payload, handle, indent=2)
+        raise RuntimeError(
+            "Repair introduced weakened or temporally shifted requirement encodings. "
+            "Re-run with --approve-weakened to proceed. "
+            f"Details: {semantic_checks_path}"
+        )
+
     if not semantic_checks.get("passed", False):
         semantic_msg = (
             f"Semantic checks failed ({_semantic_summary(semantic_checks)}). "
@@ -6119,6 +6294,8 @@ async def _run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     }
     if compile_warnings:
         artefacts["sysml_compile_warning"] = " | ".join(compile_warnings)
+    if run_dir:
+        artefacts["run_dir"] = str(run_dir)
     return artefacts
 
 
