@@ -230,4 +230,4 @@ Future work (planned):
 
 ## License
 
-MIT (see `LICENSE`).
+MIT (see [LICENSE](https://github.com/kings-crown/Autoformalization_MBSE?tab=MIT-1-ov-file)).
