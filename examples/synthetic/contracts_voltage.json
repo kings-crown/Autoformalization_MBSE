@@ -1,0 +1,78 @@
+{
+  "name": "Shared contract review - voltage limit",
+  "engine": "local",
+  "format": "text",
+  "text": "battery.voltage <= 28 V",
+  "behavior": {
+    "schema": "review_behavior/1",
+    "horizon": 3,
+    "step": {
+      "value": "1",
+      "unit": "s"
+    },
+    "variables": [
+      {
+        "name": "voltage",
+        "type": "Real",
+        "role": "output",
+        "unit": "V"
+      },
+      {
+        "name": "nominal",
+        "type": "Real",
+        "role": "parameter",
+        "unit": "V",
+        "value": "27"
+      }
+    ],
+    "initial": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "voltage"
+          },
+          {
+            "var": "nominal"
+          }
+        ]
+      }
+    ],
+    "transitions": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "voltage",
+            "at": "next"
+          },
+          {
+            "var": "nominal"
+          }
+        ]
+      }
+    ],
+    "assumptions": [],
+    "properties": [
+      {
+        "id": "VoltageLimit",
+        "requirement_ids": [
+          "REQ-001"
+        ],
+        "kind": "always",
+        "predicate": {
+          "op": "<=",
+          "args": [
+            {
+              "var": "voltage"
+            },
+            {
+              "value": "28",
+              "unit": "V"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

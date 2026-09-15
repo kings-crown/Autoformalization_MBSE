@@ -1,0 +1,46 @@
+{
+  "schema": "review_contract_rules/1",
+  "version": "1.0.0",
+  "provenance": "Original deterministic adapters informed by publicly described INSPECTA rule-book separation; no INSPECTA runtime or GUMBO syntax is imported.",
+  "references": [
+    "https://github.com/loonwerks/INSPECTA-Spec-Code-Proof-Copilot/blob/main/scp_demo_artifacts/isolette_io/Gumbo_FSE_agent_Plan.txt"
+  ],
+  "rules": [
+    {
+      "id": "FINITE_ALWAYS",
+      "version": "1.0.0",
+      "kind": "always",
+      "description": "An independently stated state predicate is required at every observed step."
+    },
+    {
+      "id": "FIRST_RESPONSE_WINDOW",
+      "version": "1.0.0",
+      "kind": "bounded_response",
+      "description": "For each fully observed trigger, forbid earlier responses and require a response in the inclusive step window; inspect overlap and pending windows separately."
+    },
+    {
+      "id": "DISTURBANCE_INVARIANT",
+      "version": "1.0.0",
+      "kind": "robustness",
+      "description": "Require a state predicate over all modeled disturbance choices within the declared finite scope; no margin optimization is implied."
+    },
+    {
+      "id": "UNBOUNDED_EVENTUAL_OBLIGATION",
+      "version": "1.0.0",
+      "kind": "eventual_response",
+      "description": "Retain eventual response as an unbounded obligation; finite completion evidence cannot prove it."
+    },
+    {
+      "id": "UNRESOLVED_SOURCE",
+      "version": "1.0.0",
+      "kind": null,
+      "description": "Preserve a source requirement without inventing an executable behavioral interpretation."
+    },
+    {
+      "id": "scalar_bound",
+      "version": "1.0.0",
+      "kind": "scalar_bound",
+      "description": "Retain a recognized exact scalar bound with its quantity identity, units and applicability context; this is consistency evidence, not a temporal controller proof."
+    }
+  ]
+}

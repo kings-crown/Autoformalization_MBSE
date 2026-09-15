@@ -1,0 +1,208 @@
+{
+  "name": "Positive shrinking charging progress",
+  "text": "R1: The battery shall have a charge level at most 100 percent.\nR2: Charging shall eventually reach exactly 100 percent.",
+  "format": "text",
+  "engine": "local",
+  "behavior": {
+    "schema": "review_behavior/1",
+    "horizon": 6,
+    "step": {
+      "value": "1",
+      "unit": "s"
+    },
+    "variables": [
+      {
+        "name": "level",
+        "type": "Real",
+        "role": "state",
+        "unit": "%"
+      },
+      {
+        "name": "charging",
+        "type": "Bool",
+        "role": "output"
+      },
+      {
+        "name": "clock",
+        "type": "Int",
+        "role": "state",
+        "unit": "s",
+        "bounds": {
+          "lower": "0",
+          "upper": "6"
+        }
+      }
+    ],
+    "initial": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "level"
+          },
+          {
+            "value": "0",
+            "unit": "%"
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "charging"
+          },
+          true
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "clock"
+          },
+          {
+            "value": "0",
+            "unit": "s"
+          }
+        ]
+      }
+    ],
+    "transitions": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "level",
+            "at": "next"
+          },
+          {
+            "op": "+",
+            "args": [
+              {
+                "var": "level"
+              },
+              {
+                "op": "*",
+                "args": [
+                  {
+                    "op": "-",
+                    "args": [
+                      {
+                        "value": "100",
+                        "unit": "%"
+                      },
+                      {
+                        "var": "level"
+                      }
+                    ]
+                  },
+                  {
+                    "value": "0.5",
+                    "unit": "1"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "charging",
+            "at": "next"
+          },
+          {
+            "op": "<",
+            "args": [
+              {
+                "var": "level",
+                "at": "next"
+              },
+              {
+                "value": "100",
+                "unit": "%"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "clock",
+            "at": "next"
+          },
+          {
+            "op": "+",
+            "args": [
+              {
+                "var": "clock"
+              },
+              {
+                "value": "1",
+                "unit": "s"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "assumptions": [],
+    "properties": [
+      {
+        "id": "P_no_overcharge",
+        "requirement_ids": [
+          "R1"
+        ],
+        "kind": "always",
+        "predicate": {
+          "op": "<=",
+          "args": [
+            {
+              "var": "level"
+            },
+            {
+              "value": "100",
+              "unit": "%"
+            }
+          ]
+        }
+      },
+      {
+        "id": "P_eventual_full",
+        "requirement_ids": [
+          "R2"
+        ],
+        "kind": "eventual_response",
+        "trigger": {
+          "op": "=",
+          "args": [
+            {
+              "var": "clock"
+            },
+            {
+              "value": "0",
+              "unit": "s"
+            }
+          ]
+        },
+        "response": {
+          "op": "=",
+          "args": [
+            {
+              "var": "level"
+            },
+            {
+              "value": "100",
+              "unit": "%"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

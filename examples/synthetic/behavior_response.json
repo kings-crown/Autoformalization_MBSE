@@ -1,0 +1,360 @@
+{
+  "name": "Scheduled response with jitter",
+  "text": "R1: After each charge command, the controller shall send an acknowledgement within 3 s.\nR2: After each charge command, the controller shall send an acknowledgement no earlier than 1 s.\nR3: Every charge command shall eventually receive an acknowledgement.",
+  "format": "text",
+  "engine": "local",
+  "behavior": {
+    "schema": "review_behavior/1",
+    "horizon": 6,
+    "step": {
+      "value": "1",
+      "unit": "s"
+    },
+    "variables": [
+      {
+        "name": "clock",
+        "type": "Int",
+        "role": "state",
+        "unit": "s",
+        "bounds": {
+          "lower": "0",
+          "upper": "6"
+        }
+      },
+      {
+        "name": "age",
+        "type": "Int",
+        "role": "state",
+        "unit": "s",
+        "bounds": {
+          "lower": "0",
+          "upper": "6"
+        }
+      },
+      {
+        "name": "target",
+        "type": "Int",
+        "role": "state",
+        "unit": "s",
+        "bounds": {
+          "lower": "0",
+          "upper": "6"
+        }
+      },
+      {
+        "name": "pending",
+        "type": "Bool",
+        "role": "state"
+      },
+      {
+        "name": "request",
+        "type": "Bool",
+        "role": "input"
+      },
+      {
+        "name": "complete",
+        "type": "Bool",
+        "role": "output"
+      },
+      {
+        "name": "nominal",
+        "type": "Int",
+        "role": "parameter",
+        "unit": "s",
+        "value": "2"
+      },
+      {
+        "name": "jitter",
+        "type": "Int",
+        "role": "disturbance",
+        "unit": "s",
+        "bounds": {
+          "lower": "-1",
+          "upper": "1"
+        }
+      }
+    ],
+    "initial": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "clock"
+          },
+          {
+            "value": "0",
+            "unit": "s"
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "age"
+          },
+          {
+            "value": "0",
+            "unit": "s"
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "target"
+          },
+          {
+            "value": "2",
+            "unit": "s"
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "pending"
+          },
+          false
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "complete"
+          },
+          false
+        ]
+      }
+    ],
+    "assumptions": [
+      {
+        "id": "A_schedule",
+        "text": "Exactly one command is scheduled at time zero; no later commands occur. Jitter is sampled when that command is accepted. This is a finite test scenario, not arbitrary request traffic.",
+        "scope": "always",
+        "predicate": {
+          "op": "=",
+          "args": [
+            {
+              "var": "request"
+            },
+            {
+              "op": "=",
+              "args": [
+                {
+                  "var": "clock"
+                },
+                {
+                  "value": "0",
+                  "unit": "s"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "transitions": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "clock",
+            "at": "next"
+          },
+          {
+            "op": "+",
+            "args": [
+              {
+                "var": "clock"
+              },
+              {
+                "value": "1",
+                "unit": "s"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "target",
+            "at": "next"
+          },
+          {
+            "op": "ite",
+            "args": [
+              {
+                "var": "request"
+              },
+              {
+                "op": "+",
+                "args": [
+                  {
+                    "var": "nominal"
+                  },
+                  {
+                    "var": "jitter"
+                  }
+                ]
+              },
+              {
+                "var": "target"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "pending",
+            "at": "next"
+          },
+          {
+            "op": "ite",
+            "args": [
+              {
+                "var": "request"
+              },
+              true,
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "var": "pending"
+                  },
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "var": "complete"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "age",
+            "at": "next"
+          },
+          {
+            "op": "ite",
+            "args": [
+              {
+                "var": "request"
+              },
+              {
+                "value": "1",
+                "unit": "s"
+              },
+              {
+                "op": "ite",
+                "args": [
+                  {
+                    "var": "pending",
+                    "at": "next"
+                  },
+                  {
+                    "op": "+",
+                    "args": [
+                      {
+                        "var": "age"
+                      },
+                      {
+                        "value": "1",
+                        "unit": "s"
+                      }
+                    ]
+                  },
+                  {
+                    "value": "0",
+                    "unit": "s"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "complete",
+            "at": "next"
+          },
+          {
+            "op": "and",
+            "args": [
+              {
+                "var": "pending",
+                "at": "next"
+              },
+              {
+                "op": ">=",
+                "args": [
+                  {
+                    "var": "age",
+                    "at": "next"
+                  },
+                  {
+                    "var": "target",
+                    "at": "next"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "properties": [
+      {
+        "id": "P_window",
+        "requirement_ids": [
+          "R1",
+          "R2"
+        ],
+        "kind": "bounded_response",
+        "trigger": {
+          "var": "request"
+        },
+        "response": {
+          "var": "complete"
+        },
+        "window": {
+          "min": 1,
+          "max": 3
+        },
+        "response_semantics": "first_after_trigger"
+      },
+      {
+        "id": "P_eventual",
+        "requirement_ids": [
+          "R3"
+        ],
+        "kind": "eventual_response",
+        "trigger": {
+          "var": "request"
+        },
+        "response": {
+          "var": "complete"
+        }
+      }
+    ]
+  }
+}

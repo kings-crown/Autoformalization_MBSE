@@ -169,6 +169,9 @@ def _compact_tlf_for_prompt(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "id": req.get("id"),
                 "category": req.get("category"),
                 "temporal_kind": req.get("temporal_kind"),
+                **({"formalization_status": req["formalization_status"],
+                    "unresolved_ranges": req["unresolved_ranges"]}
+                   if req.get("unresolved_ranges") else {}),
                 "symbols": [
                     {
                         "name": sym.get("name"),
@@ -924,6 +927,12 @@ def _native_typecheck_tlf(payload: Dict[str, Any]) -> Dict[str, Any]:
             _push_error("BAD_REQUIREMENT_ENTRY", f"requirements[{req_index}] must be an object.")
             continue
         req_id = str(req.get("id", f"R{req_index + 1}"))
+        if req.get("unresolved_ranges"):
+            _push_warning(
+                "UNRESOLVED_NUMERIC_BINDING",
+                f"Requirement {req_id} has numeric observations awaiting quantity, unit, and scope interpretation; these are not executable ranges.",
+                requirement_id=req_id,
+            )
         local_symbol_types: Dict[str, str] = {}
         for sym in req.get("symbols", []):
             if not isinstance(sym, dict):
@@ -1025,7 +1034,26 @@ def _build_tlf_payload(
             continue
 
         symbols = _extract_symbols_from_text(req_text, req_id)
-        ranges = _extract_ranges_from_text(req_text, symbols)
+        candidate_ranges = _extract_ranges_from_text(req_text, symbols)
+        local_types = {symbol["name"]: symbol["type"] for symbol in symbols}
+        ranges, unresolved_ranges = [], []
+        for candidate in candidate_ranges:
+            if local_types.get(candidate["symbol"]) != "Bool":
+                ranges.append(candidate)
+                continue
+            # A fallback proposition is not a measured quantity. Preserve the
+            # source and heuristic observation for later interpretation rather
+            # than inventing a numeric type or an unconditional scoped bound.
+            unresolved_ranges.append({
+                "status": "needs_interpretation", "executable": False,
+                "reason": "A numeric bound was detected, but no numeric quantity was identified. The Boolean fallback must not be used in arithmetic. Units, applicability, and population conditions require explicit interpretation.",
+                "candidate": candidate, "candidate_is_complete": False,
+                "original_text": req_text,
+                "numeric_mentions": [
+                    {"text": match.group(0), "start": match.start(), "end": match.end()}
+                    for match in re.finditer(r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?![\w.])", req_text)
+                ],
+            })
         category = _infer_requirement_category(req_text)
         temporal_kind = _infer_temporal_scope(req_text)
 
@@ -1040,6 +1068,8 @@ def _build_tlf_payload(
                 "temporal_kind": temporal_kind,
                 "symbols": symbols,
                 "ranges": ranges,
+                **({"formalization_status": "needs_interpretation", "unresolved_ranges": unresolved_ranges}
+                   if unresolved_ranges else {}),
                 "source_span": {
                     "line_start": idx,
                     "line_end": idx,
@@ -1494,6 +1524,19 @@ def run_z3_fragment(fragment: str) -> Dict[str, Any]:
     }
 
 
+
+def _solver_verdict(result: Dict[str, Any]) -> Optional[str]:
+    """Extract the sat/unsat/unknown verdict from a runner result, if any."""
+    if result.get("status") != "ok":
+        return None
+    for line in (result.get("result") or "").lower().splitlines():
+        token = line.strip()
+        if token in ("sat", "unsat", "unknown"):
+            return token
+    return None
+
+
+
 def _is_numeric_token(token: str) -> bool:
     return bool(re.match(r"^[+-]?(?:\d+|\d+\.\d+)$", token))
 
@@ -1718,13 +1761,143 @@ def _check_same_state(
     return {"passed": len(issues) == 0, "issues": issues}
 
 
+def _semantic_probe_commands(fragment: str) -> List[Tuple[str, List[Any]]]:
+    """Read complete SMT-LIB forms without losing comments, strings, or bodies.
+
+    Unlike line filtering, this preserves multiline declarations and definitions.
+    It rejects incomplete forms instead of silently constructing weaker context.
+    """
+    commands: List[Tuple[str, List[Any]]] = []
+    stack: List[List[Any]] = []
+    start, index = 0, 0
+    while index < len(fragment):
+        char = fragment[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == ";":
+            end = fragment.find("\n", index)
+            index = len(fragment) if end < 0 else end + 1
+            continue
+        if char == "(":
+            form: List[Any] = []
+            if stack:
+                stack[-1].append(form)
+            else:
+                start = index
+            stack.append(form)
+            index += 1
+            continue
+        if char == ")":
+            if not stack:
+                raise ValueError("Unmatched closing parenthesis in semantic probe context.")
+            form = stack.pop()
+            index += 1
+            if not stack:
+                if not form or not isinstance(form[0], str):
+                    raise ValueError("An SMT command requires an atomic command name.")
+                commands.append((fragment[start:index], form))
+            continue
+        if not stack:
+            raise ValueError("Unexpected top-level token in semantic probe context.")
+        token_start = index
+        if char in {'"', "|"}:
+            delimiter = char
+            index += 1
+            while index < len(fragment):
+                if fragment[index] == delimiter:
+                    # SMT-LIB string literals escape a quotation mark by doubling it.
+                    if delimiter == '"' and index + 1 < len(fragment) and fragment[index + 1] == '"':
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            else:
+                raise ValueError("Unterminated string or quoted symbol in semantic probe context.")
+        else:
+            while index < len(fragment) and not fragment[index].isspace() and fragment[index] not in "();":
+                index += 1
+        stack[-1].append(fragment[token_start:index])
+    if stack:
+        raise ValueError("Unclosed SMT-LIB form in semantic probe context.")
+    return commands
+
+
+def _semantic_probe_render(form: Any) -> str:
+    if isinstance(form, list):
+        return "(" + " ".join(_semantic_probe_render(item) for item in form) + ")"
+    return str(form)
+
+
+def _semantic_probe_context(
+    fragment: str,
+    enablers: set[str],
+    *,
+    drop_requirements: bool,
+) -> Tuple[str, Dict[str, Any]]:
+    """Retain background logic while removing only probe/selection commands.
+
+    Direct positive enabler assertions are administrative requirement selection.
+    Other assertions, including mixed expressions and named background premises,
+    retain their original meaning. Stateful contexts are rejected, not flattened.
+    """
+    context_commands = {
+        "set-logic", "set-option", "set-info", "declare-sort", "define-sort",
+        "declare-fun", "declare-const", "define-fun", "define-fun-rec",
+        "define-funs-rec", "declare-datatype", "declare-datatypes", "assert",
+    }
+    observational_commands = {
+        "check-sat", "check-sat-assuming", "get-model", "get-value",
+        "get-unsat-core", "get-proof", "get-info", "get-option",
+        "get-assertions", "get-assignment", "get-unsat-assumptions", "echo", "exit",
+    }
+    retained: List[str] = []
+    omitted_enablers: List[str] = []
+    omitted_requirements: List[str] = []
+    for raw, form in _semantic_probe_commands(fragment):
+        head = form[0]
+        if head in observational_commands:
+            continue
+        if head not in context_commands:
+            raise ValueError(f"Unsupported stateful or unknown semantic probe command: {head!r}.")
+        if head == "assert":
+            if len(form) != 2:
+                raise ValueError("Malformed assertion in semantic probe context.")
+            expression = form[1]
+            if isinstance(expression, str) and expression in enablers:
+                omitted_enablers.append(expression)
+                continue
+            if drop_requirements and isinstance(expression, list) and expression and expression[0] == "!":
+                attributes = expression[2:]
+                requirement_name = next((attributes[index + 1] for index, item in enumerate(attributes[:-1])
+                                         if item == ":named" and isinstance(attributes[index + 1], str)
+                                         and attributes[index + 1].strip("|").startswith("req_")), None)
+                if requirement_name is not None:
+                    omitted_requirements.append(requirement_name)
+                    continue
+        retained.append(raw)
+    return "\n".join(retained), {
+        "removed_direct_enable_assertions": omitted_enablers,
+        "removed_requirement_assertions": omitted_requirements,
+        "background_scope": "Complete declarations/definitions and substantive background assertions; direct positive requirement-selection assertions and observational commands are excluded.",
+    }
+
+
+def _semantic_probe_verdict(result: Dict[str, Any]) -> Optional[str]:
+    if result.get("cross_check") and not result["cross_check"].get("agree"):
+        return None
+    return _solver_verdict(result)
+
+
 def _check_pairwise_conflicts(
     fragment: str,
     requirement_ids: List[str],
 ) -> Dict[str, Any]:
-    """Run pairwise (check-sat-assuming (en_Ri en_Rj)) for each requirement pair.
+    """Select each requirement pair in the preserved background context.
 
-    Returns conflicts where the pair is unsatisfiable.
+    Other requirement enablers are disabled; direct positive activation commands
+    from the original all-requirements query are removed, not substantive premises.
     """
     n = len(requirement_ids)
     total_pairs = n * (n - 1) // 2
@@ -1736,7 +1909,14 @@ def _check_pairwise_conflicts(
             "conflicts": [],
         }
 
-    base = _strip_check_sat(fragment)
+    enablers = {f"en_{_sanitize_req_id(rid)}" for rid in requirement_ids}
+    try:
+        base, context_scope = _semantic_probe_context(fragment, enablers, drop_requirements=False)
+    except ValueError as exc:
+        return {"passed": False, "conflicts": [], "solver_errors": [{
+            "status": "context_error", "diagnostics": str(exc),
+            "message": "Pairwise logical context could not be reconstructed without changing its meaning.",
+        }]}
     conflicts: List[Dict[str, Any]] = []
     solver_errors: List[Dict[str, Any]] = []
 
@@ -1744,11 +1924,12 @@ def _check_pairwise_conflicts(
         for j in range(i + 1, n):
             id_a = _sanitize_req_id(requirement_ids[i])
             id_b = _sanitize_req_id(requirement_ids[j])
-            probe = f"{base}\n\n(check-sat-assuming (en_{id_a} en_{id_b}))\n"
+            selection = [f"en_{id_a}", f"en_{id_b}"]
+            selection.extend(f"(not {enabler})" for enabler in sorted(enablers - set(selection)))
+            probe = f"{base}\n\n(check-sat-assuming ({' '.join(selection)}))\n"
             result = run_z3_fragment(probe)
             status = result.get("status")
-            result_head = str(result.get("result", "")).strip().splitlines()
-            result_token = result_head[0].strip().lower() if result_head else ""
+            result_token = _semantic_probe_verdict(result)
 
             if status != "ok":
                 solver_errors.append(
@@ -1772,7 +1953,7 @@ def _check_pairwise_conflicts(
                     "result": "unsat",
                     "message": (
                         f"Requirements {requirement_ids[i]} and {requirement_ids[j]} "
-                        f"are mutually unsatisfiable."
+                        f"are unsatisfiable under the retained background with other requirement enablers disabled."
                     ),
                 })
                 continue
@@ -1796,6 +1977,7 @@ def _check_pairwise_conflicts(
         "passed": len(conflicts) == 0 and len(solver_errors) == 0,
         "conflicts": conflicts,
         "solver_errors": solver_errors,
+        "scope": context_scope,
     }
 
 
@@ -1805,57 +1987,47 @@ def _check_vacuity(
 ) -> Dict[str, Any]:
     """Check for vacuously true implications.
 
-    For each named assertion whose formula is ``(=> antecedent consequent)``,
-    check whether the antecedent is satisfiable. If it is unsatisfiable,
-    the implication is vacuously true and the requirement proves nothing.
+    For top-level named implications, check antecedent satisfiability relative
+    to substantive background assumptions with named requirements excluded.
+    Administrative enable guards are explicitly skipped. Helper bodies and nested
+    operational triggers are not traversed, so this is not a general vacuity proof.
     """
-    # Extract declaration/setup context from the whole fragment, not just the
-    # prefix before the first assert. Some generated fragments interleave
-    # declarations (e.g., en_* guards) after helper assertions.
-    decl_lines: List[str] = []
-    for line in fragment.splitlines():
-        stripped = line.strip()
-        if (
-            stripped.startswith("(set-option")
-            or stripped.startswith("(set-logic")
-            or stripped.startswith("(declare-fun")
-            or stripped.startswith("(declare-const")
-            or stripped.startswith("(define-fun")
-        ):
-            decl_lines.append(line)
-    declarations = "\n".join(decl_lines)
-
+    enablers = {f"en_{req_key}" for req_key in named_assertions}
+    try:
+        declarations, context_scope = _semantic_probe_context(fragment, enablers, drop_requirements=True)
+    except ValueError as exc:
+        return {"passed": False, "vacuous_requirements": [], "tautological_antecedents": [],
+                "solver_errors": [{"status": "context_error", "diagnostics": str(exc),
+                                   "message": "Vacuity logical context could not be reconstructed without changing its meaning."}],
+                "skipped_administrative_guards": []}
+    skipped_administrative_guards: List[Dict[str, Any]] = []
+    checked_implications = 0
     vacuous: List[Dict[str, Any]] = []
     tautological_antecedents: List[Dict[str, Any]] = []
     solver_errors: List[Dict[str, Any]] = []
 
     for req_key, formula in named_assertions.items():
-        # Check if formula is an implication: (=> <antecedent> <consequent>)
-        match = re.match(r"\(=>\s+(.+)", formula.strip())
-        if not match:
+        if not formula.lstrip().startswith("("):
             continue
-        # Parse the antecedent using balanced-paren extraction.
-        inner = match.group(1)
-        depth = 0
-        ante_end = 0
-        for idx, ch in enumerate(inner):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                if depth == 0:
-                    ante_end = idx
-                    break
-                depth -= 1
-            elif depth == 0 and ch in (" ", "\t", "\n") and idx > 0:
-                # Simple atom antecedent (e.g., a single variable).
-                ante_end = idx
-                break
-        if ante_end == 0:
-            ante_end = len(inner)
-        antecedent = inner[:ante_end].strip()
-        if not antecedent or antecedent == ")":
+        try:
+            parsed = _semantic_probe_commands(formula)
+        except ValueError as exc:
+            solver_errors.append({"requirement_id": req_key, "status": "context_error", "diagnostics": str(exc)})
             continue
-
+        if len(parsed) != 1 or parsed[0][1][0] != "=>":
+            continue
+        implication = parsed[0][1]
+        if len(implication) != 3:
+            solver_errors.append({"requirement_id": req_key, "status": "context_error", "diagnostics": "Malformed implication."})
+            continue
+        antecedent = _semantic_probe_render(implication[1])
+        if antecedent == f"en_{req_key}":
+            skipped_administrative_guards.append({
+                "requirement_id": req_key, "antecedent": antecedent,
+                "reason": "Administrative requirement-selection flag, not a stakeholder trigger. Underlying conditional triggers and helper bodies were not analyzed; this is not evidence of their non-vacuity.",
+            })
+            continue
+        checked_implications += 1
         # Build a probe: declarations + (assert antecedent) + (check-sat)
         probe = f"{declarations}\n\n(assert {antecedent})\n(check-sat)\n"
         result = run_z3_fragment(probe)
@@ -1875,8 +2047,7 @@ def _check_vacuity(
             )
             continue
 
-        status_head = str(result.get("result", "")).strip().splitlines()
-        status = status_head[0].strip().lower() if status_head else ""
+        status = _semantic_probe_verdict(result)
         if status == "unsat":
             vacuous.append({
                 "requirement_id": req_key,
@@ -1907,16 +2078,15 @@ def _check_vacuity(
                 )
                 continue
 
-            neg_status_head = str(neg_result.get("result", "")).strip().splitlines()
-            neg_status = neg_status_head[0].strip().lower() if neg_status_head else ""
+            neg_status = _semantic_probe_verdict(neg_result)
             if neg_status == "unsat":
                 tautological_antecedents.append(
                     {
                         "requirement_id": req_key,
                         "antecedent": antecedent,
                         "message": (
-                            f"Requirement {req_key}: implication antecedent appears tautological "
-                            "(always true), so the trigger condition is not discriminative."
+                            f"Requirement {req_key}: implication antecedent is forced by the retained background "
+                            "assumptions, so the trigger is not discriminative within this context."
                         ),
                     }
                 )
@@ -1958,6 +2128,12 @@ def _check_vacuity(
         "vacuous_requirements": vacuous,
         "tautological_antecedents": tautological_antecedents,
         "solver_errors": solver_errors,
+        "skipped_administrative_guards": skipped_administrative_guards,
+        "checked_implication_count": checked_implications,
+        "scope": {**context_scope,
+                  "checked": "Top-level named implication antecedents against background assumptions; named requirement assertions are excluded.",
+                  "underlying_conditional_triggers_checked": False,
+                  "limitation": "Helper definitions are preserved as logical context but their bodies and nested stakeholder triggers are not traversed. A skipped administrative guard provides no non-vacuity evidence."},
     }
 
 
@@ -5124,6 +5300,18 @@ def _build_sysml_domain_content_structural(
     return "\n".join(lines)
 
 
+def attach_review_contracts(sysml_text: str, contract_bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach the deterministic shared-contract projection to a domain candidate.
+
+    The appended package exposes a finite constraint representation. It does not
+    assert that heuristically generated domain components implement that behavior.
+    """
+    from review_contract_sysml import render_contract_sysml
+    projection = render_contract_sysml(contract_bundle)
+    return {**projection, "text": sysml_text.rstrip() + "\n\n" + projection["text"],
+            "scope": "Shared contract projection; allocation to domain behavior remains an engineering decision."}
+
+
 def _build_sysml_domain_content(
     package_name: str,
     domain_ir: Dict[str, Any],
@@ -5132,7 +5320,8 @@ def _build_sysml_domain_content(
     if str(domain_ir.get("render_style", "")).strip().lower() == "structural_curated":
         structural_model = domain_ir.get("structural_model")
         if isinstance(structural_model, dict) and structural_model:
-            return _build_sysml_domain_content_structural(package_name, domain_ir, context_snippet)
+            content = _build_sysml_domain_content_structural(package_name, domain_ir, context_snippet)
+            return attach_review_contracts(content, domain_ir["review_contracts"])["text"] if domain_ir.get("review_contracts") else content
 
     source = domain_ir.get("source", {})
     item_types = [item for item in domain_ir.get("item_types", []) if isinstance(item, dict)]
@@ -5301,7 +5490,8 @@ def _build_sysml_domain_content(
     lines.append(f"\tpart generatedDomainSystem : Architecture::{system_name};")
     lines.append("}")
     lines.append("")
-    return "\n".join(lines)
+    content = "\n".join(lines)
+    return attach_review_contracts(content, domain_ir["review_contracts"])["text"] if domain_ir.get("review_contracts") else content
 
 
 def _validate_domain_sysml_output(sysml_text: str, domain_ir: Dict[str, Any]) -> None:

@@ -1,0 +1,4 @@
+# Web application dependencies; Z3, Java, and SysML pilot tooling are separate.
+fastapi==0.136.3
+uvicorn==0.51.0
+pydantic==2.13.4

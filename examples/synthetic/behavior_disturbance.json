@@ -1,0 +1,164 @@
+{
+  "name": "Timing robustness counterexample",
+  "text": "R1: The controller shall have a latency at least 8 s.\nR2: The controller shall have a latency at most 10 s.",
+  "format": "text",
+  "engine": "local",
+  "behavior": {
+    "schema": "review_behavior/1",
+    "horizon": 2,
+    "step": {
+      "value": "1",
+      "unit": "s"
+    },
+    "variables": [
+      {
+        "name": "nominal",
+        "type": "Real",
+        "role": "parameter",
+        "unit": "s",
+        "value": "9"
+      },
+      {
+        "name": "jitter",
+        "type": "Real",
+        "role": "disturbance",
+        "unit": "s",
+        "bounds": {
+          "lower": "-2",
+          "upper": "2"
+        }
+      },
+      {
+        "name": "latency",
+        "type": "Real",
+        "role": "output",
+        "unit": "s"
+      }
+    ],
+    "initial": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "latency"
+          },
+          {
+            "op": "+",
+            "args": [
+              {
+                "var": "nominal"
+              },
+              {
+                "var": "jitter"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "transitions": [
+      {
+        "op": "=",
+        "args": [
+          {
+            "var": "latency",
+            "at": "next"
+          },
+          {
+            "op": "+",
+            "args": [
+              {
+                "var": "nominal"
+              },
+              {
+                "var": "jitter",
+                "at": "next"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "assumptions": [],
+    "properties": [
+      {
+        "id": "P_robust_window",
+        "requirement_ids": [
+          "R1",
+          "R2"
+        ],
+        "kind": "robustness",
+        "predicate": {
+          "op": "and",
+          "args": [
+            {
+              "op": ">=",
+              "args": [
+                {
+                  "var": "latency"
+                },
+                {
+                  "value": "8",
+                  "unit": "s"
+                }
+              ]
+            },
+            {
+              "op": "<=",
+              "args": [
+                {
+                  "var": "latency"
+                },
+                {
+                  "value": "10",
+                  "unit": "s"
+                }
+              ]
+            }
+          ]
+        },
+        "margin": {
+          "op": "ite",
+          "args": [
+            {
+              "op": "<",
+              "args": [
+                {
+                  "var": "jitter"
+                },
+                {
+                  "value": "0",
+                  "unit": "s"
+                }
+              ]
+            },
+            {
+              "op": "+",
+              "args": [
+                {
+                  "value": "1",
+                  "unit": "s"
+                },
+                {
+                  "var": "jitter"
+                }
+              ]
+            },
+            {
+              "op": "-",
+              "args": [
+                {
+                  "value": "1",
+                  "unit": "s"
+                },
+                {
+                  "var": "jitter"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

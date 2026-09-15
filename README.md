@@ -1,10 +1,72 @@
 # Autoformalization MBSE Toolkit
 
+## Interactive requirements review workbench
+
+Run the connected prototype:
+
+```bash
+python scripts/review_server.py
+```
+
+Open **http://127.0.0.1:8765** to upload or paste CSV, TXT, or JSON requirements, generate a SysML v2 model, inspect actual solver/compiler evidence, create revised runs, and record a scoped engineering review. The workbench supports the existing Codex pipeline and a local quantitative-constraint profile. Original sources, generated models, evidence, and decisions are stored per run.
+
+See the [workbench guide](prototypes/review-workbench/README.md) for setup, supported grammar, engine limits, and acceptance scope.
+
+
+## Shared contracts and engineer review
+
+The **Contracts** tab connects each source requirement to its interpretation rule, typed contract, assumptions, generated SysML element, and exact Z3 query/result. Engineers can inspect the proposed meaning, compare revisions, and record review decisions.
+
+### Supported contract rules
+
+The available rules are defined in [`scripts/contract_rules.json`](scripts/contract_rules.json):
+
+| Local rule | Meaning and evidence scope |
+|---|---|
+| `FINITE_ALWAYS` | Require an independently stated predicate at every observed state; check for a violating full-horizon execution. |
+| `FIRST_RESPONSE_WINDOW` | Require the first response in an inclusive step window and forbid earlier responses. Trigger reachability, overlapping commands and late windows receive separate checks/statuses. |
+| `DISTURBANCE_INVARIANT` | Search for violations across modeled disturbance choices with fixed design parameters. This is bounded robustness evidence; no worst-case margin optimization is performed. |
+| `UNBOUNDED_EVENTUAL_OBLIGATION` | Preserve eventual response as an unproved obligation. A finite completion witness cannot establish unbounded liveness. |
+| `UNRESOLVED_SOURCE` | Keep a requirement visible when no executable shared interpretation is available. No placeholder guarantee is promoted to a checked property. |
+| `scalar_bound` | Retain supported local scalar comparisons with their shared quantity identity, units and applicability context. These establish scoped consistency, not controller behavior. |
+
+The compiler selects rules from a validated behavior model supplied by an engineer or proposed by the LLM. Contract generation, rendering, and change comparison use Python and Z3; these stages make no additional LLM calls.
+
+### One representation, separate questions
+
+[`review_contracts.py`](scripts/review_contracts.py) builds the canonical contract bundle and rejects divergent source/property mirrors. [`review_behavior.py`](scripts/review_behavior.py) consumes that bundle for bounded SMT queries. [`review_contract_sysml.py`](scripts/review_contract_sysml.py), connected through [`requirements_pipeline.py`](scripts/requirements_pipeline.py), renders the same behavior/property AST into the finite SysML projection. [`review_assumptions.py`](scripts/review_assumptions.py) and the model index connect premises and exact model locations to these records.
+
+The workbench keeps the questions separate:
+
+- **Consistency:** can the encoded requirements hold together under their recorded interpretation?
+- **Candidate behavior:** does the proposed model admit a violating execution under its assumptions?
+- **Compilation:** are the generated SysML syntax, references and model constructs well formed?
+- **Engineering review:** are the interpretation, assumptions, allocation and any proposed change justified by the source and its authority?
+
+A solver result answers its particular formal query. Compilation and hash-linked traceability do not establish source fidelity or equivalence between the diagnostic trace and the inferred architecture. SysML trace variables use canonical numeric magnitudes with documented units; dimensional validation occurs in the shared AST. The current bounded checker does not establish deadlock freedom, coverage of shorter nonextendable executions, general realizability, or unbounded liveness.
+
+### Reviewing a change with Z3
+
+The directional comparison in [`review_contract_changes.py`](scripts/review_contract_changes.py) is implemented locally. Under a fixed context `C`, it checks:
+
+```text
+C AND G_new AND NOT G_old   -> newly permitted valuations
+C AND G_old AND NOT G_new   -> newly forbidden valuations
+```
+
+For behavior contracts, `C` includes declared domains, fixed parameters and explicit environmental assumptions; candidate initialization, implementation transitions and other guarantees are excluded. Scalar comparisons use their shared quantity/domain context. Context feasibility is checked first. Changed behavior contexts and unsupported comparisons remain explicit, and bounded response comparisons identify the common fully observed windows.
+
+For example, changing a voltage limit from 28 V to 29 V permits a 29 V valuation that the old contract forbade, even if the existing candidate always produces 27 V. The GUI shows the change and witness for review. This identifies a semantic effect; it does not determine whether the old or new stakeholder requirement is correct.
+
+To exercise the workflow, run the server and choose **Load contract review example**. The [workbench guide](prototypes/review-workbench/README.md#shared-contract-inspection) explains how to inspect and revise the example. Earlier saved runs keep their original evidence; new snapshots are produced by new runs.
+
+## CLI pipeline overview
+
 This repository provides a Python-first pipeline for turning natural-language requirements into:
 
 - structured requirement representations,
 - typed logical representations,
-- validated SAT/UNSAT SMT-LIB artefacts,
+- SMT-LIB artefacts with recorded solver results,
 - SysML v2 outputs, and
 - traceability and run reports.
 
@@ -110,9 +172,11 @@ python3 scripts/requirements_pipeline.py \
 
 Note: `--run-dir` is supported by both `scripts/mbse_run.py` and `scripts/requirements_pipeline.py`.
 
-## Input Support
+## CLI Input Support
 
-Prototype input contract (current stage):
+The GUI accepts CSV, TXT and JSON through its own ingestion layer. The following input restrictions describe the CLI workflow.
+
+Prototype CLI input contract (current stage):
 - `--statement` is expected to be a CSV requirements file (`.csv`).
 - Non-CSV inputs (`.pdf`, `.txt`, `.json`) are not supported at this stage.
 - Use the demonstration CSVs:
@@ -131,7 +195,7 @@ Typical pipeline outputs include:
 - `<prefix>_translate.json`: primary translation artefact; includes informal statements/proof, typed forms, SMT artefact references, and solver validation metadata.
 - `<prefix>_tlr.json`: typed logical/requirements representation used for traceability and semantic checking.
 - `<prefix>_sat.smt2`: SAT-target SMT-LIB fragment encoding the requirement conjunction.
-- `<prefix>_unsat.smt2`: UNSAT-target SMT-LIB variant used as a negative check.
+- `<prefix>_unsat.smt2`: legacy UNSAT-target negative check. A variant made contradictory with `assert false` is a diagnostic, not proof that a hazard is impossible. Behavioral safety evidence comes from an independent property-negation query over stated model premises.
 - `<prefix>_semantic_checks.json`: semantic verification results (coverage/same-state/pairwise/vacuity/symbol drift) plus repair metadata and diffs when repairs occur.
 - `<prefix>_domain_ir.json`: Domain IR used to synthesize SysML structure/behavior (`domain` and `architecture` modes).
 - `<prefix>_traceability_ir.json`: traceability IR linking requirements to generated model elements (`domain` mode).
@@ -207,16 +271,16 @@ See `scripts/tlr_contracts.py` for detection and conversions.
 
 ## Testing
 
-Automated tests are intentionally deferred at this prototype stage while the core pipeline is being stabilized.
+Run the local regression suite from the repository root after installing the workbench dependencies and `httpx` (used by FastAPI TestClient):
 
-Future work (planned):
-- Add a focused integration suite for `requirements_pipeline.py` covering:
-  - `--sysml-mode domain`,
-  - `--sysml-mode architecture`,
-  - traceability output generation,
-  - semantic-strict SMT repair/validation scenarios.
-- Expand and harden non-Codex provider support.
-- Add a usability-focused user interface on top of the current CLI workflow.
+```bash
+python -m pip install -r requirements-review.txt httpx
+python -m unittest discover -s tests -v
+```
+
+Tests requiring a solver/compiler may skip when those tools are unavailable. Passing implementation tests does not establish arbitrary document-to-model fidelity or industrial usability.
+
+Coverage includes contract/source consistency, a violating candidate whose guarantee is absent from the base assumptions, directional semantic changes, exact artifact hashes, stale/rejected review decisions, and preservation of parent revisions. Broader domain evaluation, usability studies and provider hardening remain future work.
 
 ## Troubleshooting
 
