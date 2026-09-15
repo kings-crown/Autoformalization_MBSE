@@ -83,7 +83,8 @@ if __name__ == '__main__':
     install_capture(Path(location).resolve())
     install_tlr_capture(Path(location).resolve())
     legacy.main()
-    if os.environ.get('MBSE_REVIEW_PROPOSE_BEHAVIOR') == '1':
+    if (os.environ.get('MBSE_REVIEW_PROPOSE_BEHAVIOR') == '1'
+            and os.environ.get('MBSE_REVIEW_ANALYSIS_MODE') == 'propose_design'):
         from review_behavior_proposal import propose_behavior
         requirements = json.loads((Path(location) / 'pipeline_source_requirements.json').read_text())
         asyncio.run(propose_behavior(requirements, Path(location), os.environ['CODEX_MBSE_MODEL']))

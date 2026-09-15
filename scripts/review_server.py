@@ -48,15 +48,55 @@ def write_json(path: Path, value: object) -> None:
     temporary.replace(path)
 
 
+class DesignReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reviewer: str = Field(min_length=1, max_length=200)
+    rationale: str = Field(min_length=1, max_length=6000)
+    acknowledge: bool = False
+    parent_source_hash: str | None = None
+    parent_evidence_hash: str | None = None
+
+
 class RunInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(default="Requirements model", min_length=1, max_length=160)
     text: str = Field(min_length=1, max_length=profile.MAX_INPUT_BYTES)
     format: Literal["text", "csv", "json"] = "text"
     engine: Literal["local", "pipeline"] = "local"
+    analysis_mode: Literal["requirements", "propose_design", "check_design"] = "requirements"
     behavior: dict | None = None
+    design_review: DesignReviewInput | None = None
     parent_run_id: str | None = None
     revision_rationale: str | None = Field(default=None, max_length=4000)
+
+
+def validate_analysis_selection(mode: str, engine: str, behavior: dict | None, review: dict | None) -> None:
+    """Keep requirement formalization separate from explicitly reviewed design checks."""
+    if mode not in {"requirements", "propose_design", "check_design"}:
+        raise ValueError("Select a supported analysis mode.")
+    if mode != "check_design":
+        if behavior is not None or review is not None:
+            raise ValueError("Behavior input and a design review require Check reviewed design mode. Requirements mode never checks a separate design.")
+        if mode == "propose_design" and engine != "pipeline":
+            raise ValueError("Propose design for review requires the Existing Codex pipeline engine.")
+        return
+    if behavior is None:
+        raise ValueError("Supply the candidate behavior JSON to check a reviewed design.")
+    if not review or review.get("acknowledge") is not True:
+        raise ValueError("Explicitly acknowledge review of the candidate design, its source interpretation, and its assumptions before checking it.")
+    if not str(review.get("reviewer", "")).strip() or not str(review.get("rationale", "")).strip():
+        raise ValueError("A reviewer and engineering rationale are required before checking a design.")
+
+
+def design_review_findings(behavior: dict) -> list[str]:
+    findings = []
+    if not behavior.get("initial") and not behavior.get("transitions"):
+        findings.append("No initial-state or transition rules are declared. Inspect whether the assumptions alone describe a meaningful candidate design.")
+    names = [v["name"] for v in behavior.get("variables", [])
+             if v.get("type") in {"Int", "Real"} and v.get("role") != "parameter" and not v.get("bounds")]
+    if names:
+        findings.append("No explicit numeric bounds are declared for: " + ", ".join(names) + ". Inspect whether independent design predicates constrain these values; requirement limits remain separate checks.")
+    return findings
 
 
 class ReviewInput(BaseModel):
@@ -169,6 +209,10 @@ class RunStore:
 
 def baseline_blockers(run: dict) -> list[str]:
     blockers = assumption_blockers(run) + contract_blockers(run)
+    if run.get("analysis_mode") == "propose_design":
+        blockers.append("This run only proposes a design. Review the candidate and start a separate Check reviewed design run before drawing design-compliance conclusions.")
+    if run.get("analysis_mode") == "check_design" and not (run.get("design_review") or {}).get("acknowledge"):
+        blockers.append("The candidate design has no explicit review acknowledgment.")
     if "assumptions" not in run:
         blockers.append("This historical run predates the explicit assumption ledger; create a new run for acceptance.")
     if run.get("behavior") and (run.get("behavioral_analysis") or {}).get("status") != "bounded_pass":
@@ -266,9 +310,24 @@ def evidence_integrity(run: dict) -> list[str]:
             issues.append("Analysis artifact differs from its recorded result.")
     for key, filename in (("assumptions", "assumptions.json"), ("behavior", "behavior.json"),
                           ("behavioral_analysis", "behavioral_analysis.json"), ("contracts", "contracts.json"),
-                          ("contract_changes", "contract_changes.json")):
+                          ("contract_changes", "contract_changes.json"),
+                          ("design_review", "design_review.json"), ("behavior_proposal", "design_proposal.json")):
         if run.get(key) is not None and filename in artifacts and artifacts[filename] != json_digest(run[key]):
             issues.append(f"{filename} differs from the recorded review snapshot.")
+    mode = run.get("analysis_mode")
+    if mode is not None:
+        selection = {"analysis_mode": mode, "engine": run["engine"]}
+        if artifacts.get("analysis_selection.json") != json_digest(selection):
+            issues.append("Analysis mode differs from the recorded selection.")
+        if mode != "check_design" and run.get("behavior") is not None:
+            issues.append("A separate behavior model was installed without explicit design-check selection.")
+        if mode == "check_design":
+            from review_contracts import _hash
+            review = run.get("design_review") or {}
+            if (review.get("acknowledge") is not True or review.get("source_hash") != run["source_hash"]
+                    or review.get("behavior_sha256") != _hash(run.get("behavior"))
+                    or artifacts.get("design_review.json") != json_digest(review)):
+                issues.append("Design review is missing or does not cover the exact checked source and candidate.")
     bundle = run.get("contracts")
     if bundle:
         from review_contracts import behavior_from_contracts
@@ -337,6 +396,13 @@ def run_job(store: RunStore, run_id: str) -> None:
     run = store.update(run_id, status="running")
     directory = store.directory(run_id)
     try:
+        mode = run.get("analysis_mode", "requirements")
+        validate_analysis_selection(mode, run["engine"], run.get("behavior"), run.get("design_review"))
+        if mode == "check_design":
+            from review_contracts import _hash
+            review = run["design_review"]
+            if review.get("source_hash") != run["source_hash"] or review.get("behavior_sha256") != _hash(run["behavior"]):
+                raise ValueError("The recorded design review does not cover the submitted candidate and source.")
         write_json(directory / "toolchain.json", {
             "engine": run["engine"], "solver_backend": os.getenv("MBSE_SOLVER", "z3"),
             "source_code_hashes": {name: profile.digest((ROOT / "scripts" / name).read_bytes())
@@ -373,15 +439,21 @@ def run_job(store: RunStore, run_id: str) -> None:
             from review_pipeline_adapter import run_existing_pipeline
             result = run_existing_pipeline(directory, run["name"], run["requirements"],
                                            lambda stage, status, detail: store.stage(run_id, stage, status, detail),
-                                           propose_behavior=run.get("behavior") is None)
+                                           propose_behavior=mode == "propose_design")
+            # A proposal is inspectable data, never an implicitly installed design.
+            proposal = deepcopy(result.get("behavior_proposal")) if mode == "propose_design" else None
+            if proposal:
+                if proposal.get("status") == "proposed":
+                    from review_behavior import validate_behavior
+                    from review_contracts import _hash
+                    candidate = validate_behavior(proposal["candidate"], [r["id"] for r in run["requirements"]])
+                    proposal.update(candidate=candidate, review_status="pending", source_hash=run["source_hash"],
+                                    proposal_sha256=_hash(candidate), review_findings=design_review_findings(candidate))
+                write_json(directory / "design_proposal.json", proposal)
+            elif mode != "propose_design" and result.get("behavior_proposal"):
+                result["log"] = result.get("log", "") + "\nAn unrequested behavior proposal was ignored; the selected mode does not permit its use."
             store.update(run_id, tlr=result.get("tlr"), analysis=result.get("analysis") or {}, model=result.get("model"),
-                         errors=result.get("errors", []), behavior_proposal=result.get("behavior_proposal"))
-            proposal = result.get("behavior_proposal") or {}
-            if not run.get("behavior") and proposal.get("status") == "proposed":
-                from review_behavior import validate_behavior
-                candidate = validate_behavior(proposal["candidate"], [r["id"] for r in run["requirements"]])
-                write_json(directory / "behavior.json", candidate)
-                store.update(run_id, behavior=candidate, behavior_origin="llm_proposed")
+                         errors=result.get("errors", []), behavior_proposal=proposal)
             current = store.get(run_id)
             store.update(run_id, log=current["log"] + "\n" + result.get("log", ""))
             model = result.get("model")
@@ -398,7 +470,7 @@ def run_job(store: RunStore, run_id: str) -> None:
                                         behavior, None, current.get("behavior_origin", "engineer_supplied"))
         bundle = build_contract_bundle(run["requirements"], run["source_hash"], behavior, tlr=current.get("tlr"),
                                        model=model, assumptions=assumptions)
-        if behavior:
+        if mode == "check_design":
             from review_behavior import analyze_behavior
             store.stage(run_id, "behavior", "running", "Search admissible candidate executions for violations; check feasibility and trigger reachability separately.")
             behavioral = analyze_behavior(bundle, directory)
@@ -407,10 +479,16 @@ def run_job(store: RunStore, run_id: str) -> None:
             stage_status = "passed" if behavioral.get("status") == "bounded_pass" else "failed" if behavioral.get("status") in ("counterexample", "infeasible") else "partial"
             store.stage(run_id, "behavior", stage_status, behavioral.get("summary") or "Inspect each property's verdict, horizon, and assumptions.")
         else:
-            behavioral = {"status": "not_run", "checks": [], "limitations": ["No separate candidate transition model was supplied; scalar consistency does not establish liveness or robustness."]}
+            proposal = current.get("behavior_proposal") or {}
+            pending = mode == "propose_design" and proposal.get("status") == "proposed"
+            detail = ("A design was proposed but has not been checked. Inspect its variables, dynamics, assumptions, and properties, then explicitly start a reviewed design check."
+                      if pending else "Design proposal was unavailable; no design behavior was checked. " + str(proposal.get("summary", "Inspect generator diagnostics."))
+                      if mode == "propose_design" else "Requirements mode: constraints are checked for consistency. No separate design was proposed or checked.")
+            behavioral = {"status": "pending_review" if pending else "not_run", "analysis_mode": mode,
+                          "checks": [], "summary": detail, "limitations": [detail]}
             store.update(run_id, behavioral_analysis=behavioral)
             write_json(directory / "behavioral_analysis.json", behavioral)
-            store.stage(run_id, "behavior", "not_run", behavioral["limitations"][0])
+            store.stage(run_id, "behavior", "pending_review" if pending else "not_run", detail)
         assumptions = build_assumptions(current.get("tlr"), run["requirements"], run["engine"], directory, behavior, behavioral, current.get("behavior_origin", "engineer_supplied"))
         # The domain candidate is preserved; the same contract representation adds a
         # finite projection, without claiming that domain parts implement its behavior.
@@ -532,7 +610,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             {"id": "local", "label": "Local constraint profile", "available": True,
              "description": "Exact scalar/timing grammar, existing solver runner, and actual SysML compilation. Unrecognized clauses remain visible and unverified."},
             {"id": "pipeline", "label": "Existing Codex pipeline", "available": codex,
-             "description": "Uses the configured Codex account to generate SysML and propose a typed behavior model when none is supplied. Captures assumptions and generator responses. Sends requirements to that provider; proposals require engineering review."}],
+             "description": "Uses the configured Codex account to generate requirements and SysML artifacts. A separate design proposal requires Propose design for review mode. Sends requirements to that provider; interpretations require engineering review."}],
+            "analysis_modes": [
+                {"id": "requirements", "label": "Requirements model", "default": True},
+                {"id": "propose_design", "label": "Propose design for review", "requires_engine": "pipeline"},
+                {"id": "check_design", "label": "Check reviewed design", "requires_review": True}],
             "capabilities": {"solver": {"available": bool(shutil.which(solver_path)), "detail": "Existing solver seam (default Z3); exact verdict and diagnostics recorded per run."},
                              "compiler": compiler_capability()},
             "sample": profile.SAMPLE, "behavior_sample": behavior_sample,
@@ -545,7 +627,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/runs", status_code=202)
     def submit(payload: RunInput):
+        design_review = payload.design_review.model_dump() if payload.design_review else None
         try:
+            validate_analysis_selection(payload.analysis_mode, payload.engine, payload.behavior, design_review)
             requirements = profile.parse_requirements(payload.text, payload.format, payload.name.strip())
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -568,19 +652,47 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(409, "Wait for the parent run to finish before revising its requirements.")
             if parent and not (payload.revision_rationale or "").strip():
                 raise HTTPException(422, "Explain the proposed source or interpretation change.")
+            behavior_origin = None
+            if payload.analysis_mode == "check_design":
+                from review_contracts import _hash
+                if parent:
+                    if (design_review.get("parent_source_hash") != parent["source_hash"]
+                            or design_review.get("parent_evidence_hash") != parent.get("evidence_hash")
+                            or not parent.get("evidence_hash")):
+                        raise HTTPException(409, "The reviewed parent source or evidence is stale or missing. Reload the parent and review the candidate again.")
+                    for artifact in parent.get("artifacts", []):
+                        path = store.directory(parent["id"]) / artifact["name"]
+                        if path.is_symlink() or not path.is_file() or path.resolve().parent != store.directory(parent["id"]).resolve() or profile.digest(path.read_bytes()) != artifact["sha256"]:
+                            raise HTTPException(409, "Parent artifacts changed after review. Review fresh evidence before checking the design.")
+                elif design_review.get("parent_source_hash") or design_review.get("parent_evidence_hash"):
+                    raise HTTPException(422, "Parent review hashes require a parent run.")
+                design_review.update(reviewer=design_review["reviewer"].strip(), rationale=design_review["rationale"].strip(),
+                                     created_at=now(), source_hash=profile.digest(payload.text), behavior_sha256=_hash(behavior),
+                                     findings=design_review_findings(behavior),
+                                     scope="Reviewed candidate and assumptions for this design check; no compliance result or source amendment is approved.")
+                behavior_origin = "engineer_reviewed"
+                parent_proposal = (parent or {}).get("behavior_proposal") or {}
+                if parent_proposal.get("status") == "proposed" or (parent or {}).get("behavior_origin") == "llm_proposed_reviewed":
+                    behavior_origin = "llm_proposed_reviewed"
+                    design_review["proposal_run_id"] = parent["id"]
+                    design_review["proposal_sha256"] = _hash(parent_proposal["candidate"] if parent_proposal.get("candidate") else parent["behavior"])
             run_id = "run-" + uuid.uuid4().hex[:16]
             run_dir = store.directory(run_id)
             run_dir.mkdir()
             input_file = "source." + {"text": "txt", "csv": "csv", "json": "json"}[payload.format]
             (run_dir / input_file).write_text(payload.text, encoding="utf-8")
             write_json(run_dir / "requirements.json", requirements)
+            write_json(run_dir / "analysis_selection.json", {"analysis_mode": payload.analysis_mode, "engine": payload.engine})
+            if design_review is not None:
+                write_json(run_dir / "design_review.json", design_review)
             if behavior is not None:
                 write_json(run_dir / "behavior.json", behavior)
             run = {"id": run_id, "name": payload.name.strip(), "status": "queued", "engine": payload.engine,
                    "created_at": now(), "updated_at": now(), "parent_run_id": payload.parent_run_id,
                    "revision_rationale": payload.revision_rationale, "source_hash": profile.digest(payload.text),
                    "evidence_hash": None, "input_file": input_file, "format": payload.format,
-                   "behavior": behavior, "behavior_origin": "engineer_supplied" if behavior is not None else None,
+                   "analysis_mode": payload.analysis_mode, "design_review": design_review,
+                   "behavior": behavior, "behavior_origin": behavior_origin,
                    "behavior_proposal": None, "behavioral_analysis": None,
                    "contracts": None, "contract_changes": None, "contract_reviews": [], "contract_review_hash": contract_review_hash([]),
                    "assumptions": [], "assumption_reviews": [], "assumption_review_hash": assumption_review_hash([]),
@@ -589,6 +701,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                    "artifacts": [], "reviews": [], "errors": [], "log": "", "superseded_by": [],
                    "baseline": {"status": "pending", "blockers": ["Run has not completed."]}}
             run["stages"][0].update(status="passed", detail=f"Preserved {len(requirements)} requirements, identifiers, and source references.")
+            for stage in run["stages"]:
+                if stage["id"] == "behavior":
+                    stage["label"] = {"requirements": "Design behavior (not selected)", "propose_design": "Review proposed design", "check_design": "Check design behavior"}[payload.analysis_mode]
             store.save(run)
             if parent:
                 parent["superseded_by"].append(run_id)

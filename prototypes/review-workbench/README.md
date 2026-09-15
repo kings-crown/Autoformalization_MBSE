@@ -35,9 +35,19 @@ Use real installed paths in these overrides. Missing tools produce unavailable/n
 | Engine | Behavior and scope |
 |---|---|
 | Local constraint profile | Deterministically recognizes the grammar below, creates an explicit typed interpretation, calls the existing Z3 runner, and emits SysML quantities and requirement constraints from that interpretation. It invokes the installed SysML parser/validator. No LLM call is made by this engine. |
-| Existing Codex pipeline | Invokes the repository's existing LLM pipeline using the configured Codex CLI account. Submitted requirements go to that provider. Availability in the selector means the executable was found; authentication, model access, and network access are checked during execution. Partial artifacts and failures remain inspectable. Generator-reported assumptions are captured. When no behavior model is supplied, the LLM is asked for a candidate transition model for bounded analysis; its origin and source-fidelity limits remain visible. |
+| Existing Codex pipeline | Invokes the repository's existing LLM pipeline using the configured Codex CLI account. Submitted requirements go to that provider. Availability in the selector means the executable was found; authentication, model access, and network access are checked during execution. Partial artifacts and failures remain inspectable. Generator-reported assumptions are captured. An additional LLM call proposes a transition model only when **Propose design for review** is explicitly selected. |
 
 The pipeline adapter selects its model from `MBSE_REVIEW_PIPELINE_MODEL`, then `CODEX_MBSE_MODEL`, then the installed CLI configuration, with a legacy default as fallback. `MBSE_REVIEW_PIPELINE_TIMEOUT` sets the execution limit in seconds; the default is 600. See [review_pipeline_adapter.py](../../scripts/review_pipeline_adapter.py) for the exact invocation. A pipeline-generated model is a review candidate: this workbench does not enable acceptance of its unestablished source-to-model semantic alignment.
+
+**Choose what to analyze**
+
+| Mode | What runs |
+|---|---|
+| Requirements model (`requirements`, default) | Generate requirement constraints and SysML, and check encoded requirement consistency. Neither engine requests or checks a separate candidate transition model in this mode. |
+| Propose design for review (`propose_design`) | Use the Codex engine to propose a candidate transition model. Save it for inspection with no Z3 design checks. |
+| Check reviewed design (`check_design`) | Check an explicitly supplied candidate after the engineer provides a reviewer name, rationale and acknowledgment of the reviewed model and assumptions. This is a separate question from requirement consistency. |
+
+For “The battery shall have a voltage of at most 28 V,” the requirement constraint is `battery.voltage <= 28`. A requirement-consistency witness must respect that bound. A design counterexample such as 29 V means the separately reviewed candidate permits a violation; it is not a satisfying interpretation of the requirement. A blank behavior input never requests an automatic design proposal.
 
 **Input formats and limits**
 
@@ -100,11 +110,15 @@ Reviews bind source and evidence hashes. Assumption reviews also use an optimist
 
 **Candidate behavior and temporal evidence**
 
-Expand **Optional behavior model** when creating a run to provide a candidate transition model and properties as JSON. **Load behavior example + requirements** reads the service’s supplied example and replaces both inputs together. The candidate is an explicit modeling proposal, distinct from the requirement text. When the existing LLM engine proposes it, the behavioral view labels that origin and shows proposal failures or unsupported proposals rather than inventing evidence.
+Choose **Check reviewed design** when creating a run to provide a candidate transition model and properties as JSON. Inspect the candidate's variable roles, numerical domains, initial conditions, transitions, assumptions and mapping to source requirements. Supply the reviewer and rationale, then explicitly acknowledge that review before submitting. This acknowledgment authorizes the bounded check; it is not final model acceptance or organizational signoff.
+
+**Load behavior example + requirements** and **Load contract review example** replace the inputs with matching example requirements and behavior and select the design-check mode. They leave the review acknowledgment unchecked. Review the example and complete the same fields before starting its analysis.
+
+To request an LLM candidate, select the Codex engine and **Propose design for review**. The behavioral view shows the proposal and its origin, or a proposal failure. The candidate is saved unchecked. After inspecting and, if needed, editing it, create a child run in **Check reviewed design** mode with a fresh reviewer, rationale and acknowledgment. Structural validation of a proposal does not establish that its assumptions reflect the source.
 
 The **Behavioral analysis** tab presents model feasibility and each returned property check with its kind, exact verdict, scope/horizon, source requirement links, relevant model elements, artifacts, and actual execution/counterexample trace. It also preserves the full query/result JSON. Different quantifications and horizons remain explicit: one feasible execution does not establish every execution, bounded exclusion of a hazard does not establish unbounded safety, and unbounded liveness remains unproved. Checks cover only executions extendable through the complete configured horizon. Shorter or deadlocking executions and transition totality remain unverified. These limitations appear before property results. The separate candidate’s result does not prove equivalence to generated SysML behavior or the implemented system.
 
-Revisions preserve the behavior JSON. Engineers can change only this candidate while keeping requirement wording unchanged, provided they record a revision rationale. Removing the JSON omits an engineer-supplied candidate; the LLM pipeline may then propose a new one. With the local engine, no behavioral analysis runs without a candidate. Source and candidate revisions produce fresh artifacts and retain their parent history.
+Engineers can revise the candidate while keeping requirement wording unchanged, provided they record a revision rationale. Each design-check run requires its own explicit review acknowledgment; prior checks and example loading do not approve a revised candidate. To omit design analysis, select **Requirements model**. To request a new LLM candidate, explicitly select **Propose design for review**. Source and candidate revisions produce fresh artifacts and retain their parent history.
 
 **Persistence and evidence**
 
@@ -139,13 +153,13 @@ The LLM pipeline reports **Pending review** when a retained native TLR row and u
 
 The **Contracts** tab connects exact source passages, versioned rules, typed contracts, assumptions, SysML declarations, and solver artifacts. To inspect the local example:
 
-1. Choose **Load contract review example**, then **Generate SysML model**. The example supplies a candidate whose voltage stays at 27 V and a separate requirement limiting voltage to 28 V. This example requires no LLM request.
+1. Choose **Load contract review example**. It selects **Check reviewed design** and supplies a candidate whose voltage stays at 27 V with a separate requirement limiting voltage to 28 V. Inspect the candidate, enter a reviewer and rationale, and explicitly acknowledge the design review before submitting. Loading the example does not approve it. This example requires no LLM request.
 2. Open **Contracts** and select the voltage contract. Inspect its source, rule, property, assumptions, linked SysML declaration, and exact solver query/result. A successful bounded check applies only to the displayed scope.
 3. Record separate assumption and contract decisions with engineering rationales. Each decision may accept, reject, or defer the interpretation; it preserves the source and evidence.
-4. Choose **Propose a source or behavior revision**. Change the source limit from 28 V to 29 V and the behavior property's predicate limit from `28` to `29`. Keep the candidate's `nominal` parameter at `27`, supply a rationale, and generate the child run.
+4. Choose **Propose a source or behavior revision** and select **Check reviewed design**. Change the source limit from 28 V to 29 V and the behavior property's predicate limit from `28` to `29`. Keep the candidate's `nominal` parameter at `27`, record the revision rationale, and complete a fresh design review acknowledgment before generating the child run.
 5. Inspect the child's change comparison. Z3 can find a voltage above 28 V and at most 29 V that the new requirement permits. This witness describes a contract valuation; it need not be an execution of the current candidate, which satisfies both limits.
 6. Investigate the source justification, operating context, and authority before approving the change. Final prototype acceptance requires current assumption and contract decisions, explicit acknowledgment of revision changes, and the other solver, compiler, and interpretation checks. Removing a contradiction does not establish which requirement was wrong.
 
-To inspect a failed behavioral guarantee, change only `nominal` to `29` while retaining the 28 V source and property limit. Z3 should report a counterexample. This changes the modeled context, so the revision comparison cannot establish equivalence under an unchanged context.
+To inspect a failed behavioral guarantee, change only `nominal` to `29` while retaining the 28 V source and property limit. Review and acknowledge that revised candidate in **Check reviewed design** mode. Z3 should report a counterexample. This changes the modeled context, so the revision comparison cannot establish equivalence under an unchanged context.
 
 Runs created without a contract snapshot retain their original artifacts. Generate a new candidate to obtain contract evidence and decisions. Compilation checks SysML syntax, references, and well-formedness; neither compilation nor bounded Z3 evidence establishes stakeholder intent, architectural allocation, or unbounded liveness.

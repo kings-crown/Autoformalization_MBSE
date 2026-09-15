@@ -1,6 +1,5 @@
 """Real API/solver/compiler lifecycle and review-boundary integration tests."""
 import json
-import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -14,6 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from review_server import create_app
 from review_sysml import compiler_capability
 from review_profile import SAMPLE
+
+
+def design_review(parent=None):
+    record = {'reviewer': 'Fixture engineer', 'acknowledge': True,
+              'rationale': 'Inspected the independent synthetic dynamics, bounds and checked properties.'}
+    if parent:
+        record.update(parent_source_hash=parent['source_hash'], parent_evidence_hash=parent['evidence_hash'])
+    return record
 
 
 class WorkbenchTests(unittest.TestCase):
@@ -161,14 +168,16 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(packet['run']['reviews'][0]['assumption_decisions'][-1]['decision'], 'accept')
 
     def test_behavior_schema_is_validated_before_allocating_a_run(self):
-        response = self.client.post('/api/runs', json={'text': 'battery.voltage >= 1 V', 'behavior': {'schema': 'unknown'}})
+        response = self.client.post('/api/runs', json={'text': 'battery.voltage >= 1 V', 'behavior': {'schema': 'unknown'},
+                                                      'analysis_mode': 'check_design', 'design_review': design_review()})
         self.assertEqual(response.status_code, 422, response.text)
         self.assertEqual(self.client.get('/api/runs').json()['runs'], [])
 
     def test_behavior_counterexample_model_only_revision_and_inspection_links(self):
         from test_review_behavior_proposal import voltage_behavior
         parent = self.completed({'name': 'Robustness fixture', 'text': 'battery.voltage <= 28 V',
-                                 'behavior': voltage_behavior()})
+                                 'behavior': voltage_behavior(), 'analysis_mode': 'check_design',
+                                 'design_review': design_review()})
         self.assertEqual(parent['status'], 'completed', parent['errors'])
         self.assertEqual(parent['analysis']['status'], 'sat')
         self.assertEqual(parent['behavioral_analysis']['status'], 'counterexample')
@@ -180,6 +189,7 @@ class WorkbenchTests(unittest.TestCase):
         self.assertTrue(req_element['assumption_ids'])
         child = self.completed({'name': 'Revised fixed design', 'text': 'battery.voltage <= 28 V',
                                 'behavior': voltage_behavior('27'), 'parent_run_id': parent['id'],
+                                'analysis_mode': 'check_design', 'design_review': design_review(parent),
                                 'revision_rationale': 'Synthetic design parameter revision; source unchanged.'})
         self.assertEqual(child['source_hash'], parent['source_hash'])
         self.assertNotEqual(child['evidence_hash'], parent['evidence_hash'])
@@ -191,34 +201,6 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIn('behavior.json', packet['files'])
         self.assertIn('behavioral_analysis.json', packet['files'])
         self.assertIn('model_inspection.json', packet['files'])
-
-    @unittest.skipUnless(shutil.which('codex'), 'Configured Codex CLI unavailable')
-    def test_llm_proposal_runs_checker_with_explicit_origin_and_no_auto_acceptance(self):
-        from test_review_behavior_proposal import voltage_behavior
-        from review_profile import interpret
-        from review_sysml import generate_sysml
-        from review_behavior import validate_behavior
-        def generated(directory, name, requirements, progress, propose_behavior=True):
-            self.assertTrue(propose_behavior)
-            local_tlr = interpret(requirements)
-            model = generate_sysml(name, requirements, local_tlr)
-            path = directory / 'Generated.sysml'
-            path.write_text(model['text'])
-            model['path'] = str(path)
-            proposal = {'status': 'proposed', 'origin': 'llm', 'summary': 'Synthetic candidate from controlled provider response.',
-                        'candidate': validate_behavior(voltage_behavior(), ['REQ-001'])}
-            return {'tlr': {'schema_version': 'review-pipeline-1', 'raw': local_tlr,
-                            'requirements': [{**r, 'status': 'unsupported'} for r in requirements]},
-                    'analysis': {'status': 'partial', 'assumptions': []}, 'model': model,
-                    'behavior_proposal': proposal, 'errors': [], 'log': ''}
-        with patch('review_pipeline_adapter.run_existing_pipeline', side_effect=generated):
-            run = self.completed({'name': 'LLM candidate fixture', 'text': 'battery.voltage <= 28 V', 'engine': 'pipeline'})
-        self.assertEqual(run['status'], 'completed', run['errors'])
-        self.assertEqual(run['behavior_origin'], 'llm_proposed')
-        self.assertEqual(run['behavioral_analysis']['status'], 'counterexample')
-        self.assertTrue(any(a['origin'] == 'llm_proposed_model' for a in run['assumptions']))
-        self.assertTrue(any(a['origin'] == 'pipeline_audit' for a in run['assumptions']))
-        self.assertEqual(self.review(run).status_code, 409)
 
     def test_validation_and_local_origin_guard(self):
         self.assertEqual(self.client.post('/api/runs', json={'text': 'id,text\nR1,a\nR1,b', 'format': 'csv'}).status_code, 422)

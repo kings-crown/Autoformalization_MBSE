@@ -137,7 +137,7 @@ def build_assumptions(tlr: dict | None, requirements: list[dict], engine: str,
             {'artifact': 'llm_assumption_policy.txt' if (run_dir / 'llm_assumption_policy.txt').exists() else 'pipeline_review_analysis.json'})
 
     if behavior:
-        model_origin = "llm_proposed_model" if behavior_origin == "llm_proposed" else "engineer_model"
+        model_origin = "llm_proposed_model" if (behavior_origin or "").startswith("llm_proposed") else "engineer_model"
         ids = sorted({rid for p in behavior.get('properties', []) for rid in p.get('requirement_ids', [])})
         add('The supplied initial conditions and transition rules are an adequate candidate model of the system being reviewed.',
             model_origin, ids, 'unestablished',

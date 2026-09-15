@@ -1,12 +1,14 @@
 """Conservative adapter boundaries; no LLM or network calls required."""
 import hashlib
 import json
+import os
+import runpy
 from pathlib import Path
 import shutil
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import review_pipeline_adapter as adapter
@@ -77,6 +79,35 @@ part bogus :> Bogus;
             path.write_text(original)
             self.assertEqual(adapter._correct_trace_typing(path), [])
             self.assertEqual(path.read_text(), original)
+
+
+class ProposalOptInTests(unittest.TestCase):
+    def test_adapter_only_requests_proposals_when_explicitly_selected(self):
+        observed = []
+        def child(command, **kwargs):
+            observed.append(kwargs['env']['MBSE_REVIEW_PROPOSE_BEHAVIOR'])
+            return Mock(poll=Mock(return_value=0), returncode=0)
+        with tempfile.TemporaryDirectory() as directory, patch.object(adapter.subprocess, 'Popen', side_effect=child), patch.object(adapter, '_selected_model', return_value=('fixture-model', 'test')):
+            default_run, proposal_run = Path(directory) / 'default', Path(directory) / 'proposal'
+            default_run.mkdir()
+            proposal_run.mkdir()
+            adapter.run_existing_pipeline(default_run, 'Requirements default', [{'id': 'R1', 'text': 'battery.voltage <= 28 V'}])
+            adapter.run_existing_pipeline(proposal_run, 'Explicit proposal', [{'id': 'R1', 'text': 'battery.voltage <= 28 V'}], propose_behavior=True)
+        self.assertEqual(observed, ['0', '1'])
+
+    def test_child_entry_requires_both_explicit_mode_and_proposal_flag(self):
+        script = Path(adapter.__file__).with_name('review_llm_entry.py')
+        requirements = [{'id': 'R1', 'text': 'battery.voltage <= 28 V'}]
+        for flag, mode, expected in [('1', 'requirements', 0), ('0', 'propose_design', 0), ('1', 'propose_design', 1)]:
+            with self.subTest(flag=flag, mode=mode), tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / 'pipeline_source_requirements.json').write_text(json.dumps(requirements))
+                environment = {'MBSE_REVIEW_CAPTURE_DIR': directory, 'CODEX_MBSE_MODEL': 'fixture-model',
+                               'MBSE_REVIEW_PROPOSE_BEHAVIOR': flag, 'MBSE_REVIEW_ANALYSIS_MODE': mode}
+                with patch.dict(os.environ, environment), patch.object(adapter.legacy, 'main'), patch.object(adapter.legacy, '_codex_chat_text', AsyncMock()), patch.object(adapter.legacy, '_build_tlf_payload', Mock()), patch('review_behavior_proposal.propose_behavior', AsyncMock()) as proposer:
+                    runpy.run_path(str(script), run_name='__main__')
+                    self.assertEqual(proposer.await_count, expected)
+                    if expected:
+                        proposer.assert_awaited_once_with(requirements, Path(directory), 'fixture-model')
 
 
 class LargeUploadTests(unittest.TestCase):

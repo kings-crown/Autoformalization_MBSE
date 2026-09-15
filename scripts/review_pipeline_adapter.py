@@ -176,7 +176,7 @@ def run_existing_pipeline(
     name: str,
     requirements: list[dict[str, Any]],
     progress: Progress | None = None,
-    propose_behavior: bool = True,
+    propose_behavior: bool = False,
 ) -> dict[str, Any]:
     """Run the actual Codex CLI pipeline, retaining partial and failed artifacts.
 
@@ -217,6 +217,7 @@ def run_existing_pipeline(
         "PYTHONDONTWRITEBYTECODE": "1", "CODEX_STREAM": "0",
         "MBSE_REVIEW_CAPTURE_DIR": str(run_dir),
         "MBSE_REVIEW_PROPOSE_BEHAVIOR": "1" if propose_behavior else "0",
+        "MBSE_REVIEW_ANALYSIS_MODE": "propose_design" if propose_behavior else "requirements",
     })
     # Preserve every imported clause at the legacy SMT-prompt boundary. The
     # default 12,000-character source prefix silently omits larger uploads.

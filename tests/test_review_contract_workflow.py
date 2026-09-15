@@ -80,8 +80,15 @@ class ContractWorkflowTests(unittest.TestCase):
 
     def completed(self, *, candidate=None, limit="28", **extra):
         payload = {"name": "Shared voltage contract", "engine": "local", "format": "text",
-                   "text": f"battery.voltage <= {limit} V", "behavior": candidate or voltage_candidate(limit=limit)}
+                   "text": f"battery.voltage <= {limit} V", "behavior": candidate or voltage_candidate(limit=limit),
+                   "analysis_mode": "check_design",
+                   "design_review": {"reviewer": "Contract workflow fixture", "acknowledge": True,
+                                     "rationale": "Independent synthetic candidate and property interpretation inspected."}}
         payload.update(extra)
+        if payload.get("parent_run_id"):
+            parent = self.load(payload["parent_run_id"])
+            payload["design_review"].update(parent_source_hash=parent["source_hash"],
+                                            parent_evidence_hash=parent["evidence_hash"])
         response = self.client.post("/api/runs", json=payload)
         self.assertEqual(response.status_code, 202, response.text)
         run_id = response.json()["id"]

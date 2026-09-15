@@ -10,6 +10,10 @@ python scripts/review_server.py
 
 Open **http://127.0.0.1:8765** to upload or paste CSV, TXT, or JSON requirements, generate a SysML v2 model, inspect actual solver/compiler evidence, create revised runs, and record a scoped engineering review. The workbench supports the existing Codex pipeline and a local quantitative-constraint profile. Original sources, generated models, evidence, and decisions are stored per run.
 
+The default **Requirements model** mode generates and checks requirement constraints without requesting or checking a separate design model. For example, “The battery shall have a voltage of at most 28 V” contributes `battery.voltage <= 28` to the requirement constraints; 29 V cannot satisfy that bound. A separate design check asks whether a supplied design can violate the bound and must be explicitly selected.
+
+Choose **Propose design for review** to ask the Codex pipeline for an unchecked candidate transition model. Inspect its variables, domains, initial conditions, transitions and source-linked properties before creating a new **Check reviewed design** run. That mode requires supplied behavior JSON, a reviewer, a rationale and an explicit acknowledgment. Loading an example or receiving an LLM proposal does not grant approval or start a design check. Requirement consistency and design counterexamples remain separate results.
+
 See the [workbench guide](prototypes/review-workbench/README.md) for setup, supported grammar, engine limits, and acceptance scope.
 
 
@@ -30,7 +34,7 @@ The available rules are defined in [`scripts/contract_rules.json`](scripts/contr
 | `UNRESOLVED_SOURCE` | Keep a requirement visible when no executable shared interpretation is available. No placeholder guarantee is promoted to a checked property. |
 | `scalar_bound` | Retain supported local scalar comparisons with their shared quantity identity, units and applicability context. These establish scoped consistency, not controller behavior. |
 
-The compiler selects rules from a validated behavior model supplied by an engineer or proposed by the LLM. Contract generation, rendering, and change comparison use Python and Z3; these stages make no additional LLM calls.
+Scalar contracts come from the supported requirement interpretation. Behavior rules are selected from a structurally validated candidate only in an explicitly selected design mode. An LLM proposal remains unchecked until an engineer reviews it and submits a separate design-check run. Contract generation, rendering, and change comparison use Python and Z3; these stages make no additional LLM calls.
 
 ### One representation, separate questions
 
