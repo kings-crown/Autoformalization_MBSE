@@ -114,11 +114,32 @@ class ContractWorkflowTests(unittest.TestCase):
     def review(self, run, **overrides):
         payload = {"source_hash": run["source_hash"], "evidence_hash": run["evidence_hash"],
                    "assumption_review_hash": run["assumption_review_hash"], "contract_review_hash": run["contract_review_hash"],
+                   "architecture_binding_review_hash": run.get("architecture_binding_review_hash"),
+                   "correction_summary_sha256": (run.get("correction_summary") or {}).get("sha256"),
                    "reviewer": "Contract workflow fixture", "decision": "approve", "acknowledge": True,
                    "scope": "This synthetic candidate and its inspected interpretations only.",
                    "rationale": "Inspect local contract, model, scope and solver evidence."}
         payload.update(overrides)
         return self.client.post(f"/api/runs/{run['id']}/reviews", json=payload)
+
+    def accept_bindings(self, run):
+        view = self.client.get(f"/api/runs/{run['id']}/bindings").json()
+        attribute = next(e for e in view['choices'] if e['kind'] == 'attribute' and e.get('unit') == 'V')
+        owner = next((e for e in view['choices'] if e['kind'] == 'part'), attribute)
+        for target in view['status']['targets']:
+            if not target['required']:
+                continue
+            element = attribute if target['target_kind'] == 'variable' else owner
+            response = self.client.post(f"/api/runs/{run['id']}/bindings/reviews", json={
+                'source_hash': run['source_hash'], 'evidence_hash': run['evidence_hash'],
+                'model_sha256': view['status']['model_sha256'],
+                'architecture_binding_review_hash': run['architecture_binding_review_hash'],
+                'target_kind': target['target_kind'], 'target_id': target['target_id'], 'element_id': element['id'],
+                'decision': 'accept', 'reviewer': 'Contract workflow fixture',
+                'rationale': 'Explicit association to this synthetic domain declaration; no implementation equivalence claim.'})
+            self.assertEqual(response.status_code, 201, response.text)
+            run = self.load(run['id'])
+        return run
 
     def accept_assumptions(self, run):
         for assumption in run["assumptions"]:
@@ -196,7 +217,7 @@ class ContractWorkflowTests(unittest.TestCase):
         self.assertEqual(self.review(run).status_code, 409)
 
     def test_pending_rejected_stale_and_changed_contract_decisions_gate_acceptance(self):
-        run = self.accept_assumptions(self.completed())
+        run = self.accept_bindings(self.accept_assumptions(self.completed()))
         contract_bytes = (self.root / run["id"] / "contracts.json").read_bytes()
         initial_hash = run["contract_review_hash"]
         self.assertEqual(self.review(run).status_code, 409)
@@ -260,7 +281,7 @@ class ContractWorkflowTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(query.read_bytes()).hexdigest(), evidence["query_sha256"])
         self.assertEqual(child["contract_reviews"], [])
         self.assertEqual(self.review(child).status_code, 409)
-        child = self.accept_assumptions(child)
+        child = self.accept_bindings(self.accept_assumptions(child))
         self.assertEqual(self.decide_contract(child).status_code, 201)
         child = self.load(child["id"])
         missing_ack = self.review(child)

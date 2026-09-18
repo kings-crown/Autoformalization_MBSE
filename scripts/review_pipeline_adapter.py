@@ -210,10 +210,11 @@ def run_existing_pipeline(
     )
     notify("extraction", "complete", f"Preserved {len(requirements)} input requirements and their source references.")
     notify("interpretation", "running", "Running the existing Codex requirements pipeline.")
+    from review_configuration import SEMANTIC_REPAIRS, SMT_FIX_ATTEMPTS, SYSML_MODE
     env = os.environ.copy()
     env.update({
-        "SMT_MAX_SEMANTIC_REPAIRS": "0", "SMT_FIX_ATTEMPTS": "1",
-        "MBSE_TLR_TYPECHECK_MODE": "error", "MBSE_SOLVER": "z3",
+        "SMT_MAX_SEMANTIC_REPAIRS": str(SEMANTIC_REPAIRS), "SMT_FIX_ATTEMPTS": str(SMT_FIX_ATTEMPTS),
+        "MBSE_TLR_TYPECHECK_MODE": "error", "MBSE_SOLVER": legacy._SOLVER_RUNNER.name,
         "PYTHONDONTWRITEBYTECODE": "1", "CODEX_STREAM": "0",
         "MBSE_REVIEW_CAPTURE_DIR": str(run_dir),
         "MBSE_REVIEW_PROPOSE_BEHAVIOR": "1" if propose_behavior else "0",
@@ -239,7 +240,7 @@ def run_existing_pipeline(
         sys.executable, str(Path(__file__).with_name("review_llm_entry.py")),
         "--statement", str(input_path), "--output-prefix", str(prefix),
         "--sysml-output", str(model_path), "--traceability-output", str(trace_path),
-        "--sysml-mode", "domain", "--llm-provider", "codex", "--model", model,
+        "--sysml-mode", SYSML_MODE, "--llm-provider", "codex", "--model", model,
         "--skip-intent-formalization", "--semantic-strict", "--skip-sysml-compile",
     ]
     started = time.monotonic()

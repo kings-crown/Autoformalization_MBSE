@@ -1,6 +1,6 @@
 **Requirements-to-SysML review workbench**
 
-This local application connects requirement ingestion, generation, actual solver/compiler runs, and engineer review. Its frontend includes a model explorer, source-linked assumption decisions, and bounded behavioral evidence. The actual generated SysML stays visible beside the explorer with line numbers and raw download. Its frontend is [index.html](index.html); the service is [review_server.py](../../scripts/review_server.py).
+This local application connects requirement ingestion, generation, actual solver/compiler runs, and engineer review. Its frontend includes a model explorer, source-linked assumption decisions, and bounded behavioral evidence. The actual generated SysML stays visible beside the explorer with line numbers and raw download. Its frontend is [index.html](index.html); the HTTP service is [review_server.py](../../scripts/review_server.py). Both the GUI and default command-line entry point execute [review_workflow.py](../../scripts/review_workflow.py), using the same request schema, generation policy, evidence artifacts, and acceptance conditions.
 
 **Run the application**
 
@@ -29,6 +29,26 @@ python scripts/review_server.py --port 8765 --data-dir /path/to/review-runs
 ```
 
 Use real installed paths in these overrides. Missing tools produce unavailable/not-run evidence, rather than a simulated pass. The service binds to `127.0.0.1`; it is a local research application, not an authenticated multiuser deployment.
+
+**Run the same workflow from the command line**
+
+With your requirements file, run:
+
+```bash
+python scripts/requirements_pipeline.py \
+  --statement requirements.csv \
+  --data-dir out/review_workbench
+```
+
+The optional `run` subcommand is equivalent. The CLI accepts the same TXT, CSV, and JSON formats, and defaults to the same local engine and requirement-consistency mode. Use `--engine pipeline` for Codex generation. No server is needed to execute the CLI. Its saved run appears in the GUI when both use the same data directory.
+
+For a request containing a reviewed candidate, provenance, or revision details, `--request-json request.json` accepts the exact API request object. This file contains fields such as `text`, `format`, `engine`, and `analysis_mode`; it is distinct from a requirements JSON array supplied through `--statement`. Do not combine `--request-json` with request-setting flags. Flag-based candidate checks also support `--behavior`, `--candidate-provenance`, `--reviewer`, `--rationale`, and an explicit `--acknowledge-design`. All backend review and parent-evidence checks still apply. A CLI invocation does not accept the resulting model.
+
+CLI stdout contains a JSON `run` and optional `exports`. Exit code `0` means the workflow completed; inspect solver/compiler verdicts separately. A completed run can contain an UNSAT conflict or a design counterexample. Exit code `1` denotes execution/export failure and `2` denotes invalid input. Optional `--output-prefix`, `--sysml-output`, and `--traceability-output` copy artifacts to new destinations outside the run store; they preserve the original saved evidence.
+
+Both interfaces record effective settings in `execution_config.json`, displayed in **Formalization quality**. The shared workflow preserves source wording and IDs and skips the legacy optional intent-drafting stage. The pipeline engine uses strict encoding diagnostics, disables semantic repair, permits one SMT correction attempt, and compiles the final SysML. The generator model and solver settings are recorded per run. Identical settings do not guarantee identical responses from separate LLM calls.
+
+Older CSV generator controls now require `python scripts/requirements_pipeline.py legacy ...`. They are a separate compatibility path and do not create the shared GUI review lifecycle. Standalone `translate`, `harvest`, and `formalize_intent` utilities remain explicit commands. See the [main README](../../README.md#legacy-generator-and-utilities) for migration details.
 
 **Choose an engine**
 
@@ -108,6 +128,27 @@ Compound clauses and conditional applicability, including `and`, `or`, `if`, `un
 
 Reviews bind source and evidence hashes. Assumption reviews also use an optimistic concurrency hash; a changed assumption decision invalidates the current final-review acknowledgment and requires a fresh final model review. Changed artifacts or stale hashes are rejected. A newer candidate supersedes its parent's eligibility for current acceptance, including while the new run is still in progress. Historical evidence and decisions remain available.
 
+**Assess the formalization evidence**
+
+Open **Formalization quality** to inspect the run's effective execution settings and the recorded evidence profile. `formalization_quality.json` is saved after execution and can be downloaded with the other artifacts. It reports separate dimensions rather than an overall quality score:
+
+| Question | Recorded evidence |
+|---|---|
+| Were the input requirements preserved? | Distinct source IDs, text/location availability, and duplicate IDs |
+| Which requirements have interpretations? | Disjoint supported-local, pending-candidate, unresolved, missing, and ambiguous ID lists |
+| Were types and units checked? | Available native typecheck and candidate schema/unit validation, with missing or skipped checks explicit |
+| Is the encoded requirement set consistent? | Actual SAT, UNSAT, unknown, or not-run verdict; source-to-check associations |
+| Did encoding diagnostics run? | Named coverage, same-state, pairwise-conflict, vacuity, and symbol checks, including omissions and failures |
+| What does the separate design satisfy? | Candidate feasibility, finite property outcomes and scope; liveness remains unproved when appropriate |
+| Does the SysML compile? | Actual compilation result and artifact identity |
+| Which modeling premises need investigation? | Provenance records, missing next-state references, and syntactically repeated guarantees |
+| What needs engineer review? | Generation-time counts of interpretations, assumptions, contracts, architectural bindings, and revision changes |
+| Is the evidence internally consistent? | Recorded artifact/snapshot hash checks |
+
+An LLM-generated candidate remains **Pending review** even when its SMT is SAT and its SysML compiles. SAT establishes consistency of the encoded formula; it cannot assess whether the formula captures stakeholder intent. An UNSAT core identifies a conflict to investigate; it cannot decide which requirement has authority. Source coverage does not establish translation accuracy, and compilation does not prove that architectural parts implement the checked dynamics.
+
+The quality artifact is an immutable completion snapshot, including its generation-time review obligations. Current pending/accepted/rejected decisions are shown in the live **Assumptions**, **Contracts**, **Architecture bindings**, and **Review** views. Recording a decision does not rewrite the quality snapshot or create a numerical semantic-confidence claim. Historical runs without this artifact remain identifiable as lacking that assessment.
+
 **Candidate behavior and temporal evidence**
 
 Choose **Check reviewed design** when creating a run to provide a candidate transition model and properties as JSON. Inspect the candidate's variable roles, numerical domains, initial conditions, transitions, assumptions and mapping to source requirements. Supply the reviewer and rationale, then explicitly acknowledge that review before submitting. This acknowledgment authorizes the bounded check; it is not final model acceptance or organizational signoff.
@@ -120,9 +161,25 @@ The **Behavioral analysis** tab presents model feasibility and each returned pro
 
 Engineers can revise the candidate while keeping requirement wording unchanged, provided they record a revision rationale. Each design-check run requires its own explicit review acknowledgment; prior checks and example loading do not approve a revised candidate. To omit design analysis, select **Requirements model**. To request a new LLM candidate, explicitly select **Propose design for review**. Source and candidate revisions produce fresh artifacts and retain their parent history.
 
+**Structured candidate review and architecture bindings**
+
+In **Check reviewed design**, load a supplied candidate or prepare a revision from an unchecked proposal, then select **Inspect candidate**. The **Candidate equations and provenance** editor exposes variable declarations, the time horizon, and individual initial, transition, assumption, and property expressions. Edit expressions such as `next(voltage) = nominal` or `voltage <= 28[V]`, then apply the draft. The service parses this restricted language and checks the complete candidate's types and units; inspection makes no LLM or solver call. Advanced JSON remains available for adding or removing model structure.
+
+Each statement has an origin, supporting requirement IDs, and rationale. These are recorded review claims, not proof that an equation follows from the source. Source-origin claims require existing requirement IDs. Editing an expression invalidates its previous provenance; changing the candidate or its provenance clears the design acknowledgment. Apply the draft and review it before submitting a new check.
+
+Inspection flags state/output variables with no next-state reference and guarantees repeated in always assumptions or numeric bounds. These are syntactic diagnostics, not complete proofs of missing dynamics or circular reasoning. No constraint is added or removed automatically. An intentional free variable or independently justified domain should be explained in the recorded rationale.
+
+After generation, open **Architecture bindings**. Select a behavior variable or contract, then an actual domain part, port, or attribute. A variable bound through a part or port also needs a contained value attribute. Inspect the highlighted source declaration, compatibility information, and intended association before recording **accept**, **reject**, or **defer** with a reviewer and rationale. Known type/unit mismatches cannot be accepted. Unrecognized declarations require an explicit acknowledgment of unresolved compatibility. Inherited instance paths are not resolved by the conservative index; bindings identify the exact declarations shown.
+
+For new design-check runs, required variables and executable contracts need current accepted bindings before final prototype acceptance. Binding decisions preserve the generated SysML, contract snapshot, and solver evidence. A later rejection, deferral, or changed binding invalidates acceptance. These associations do not prove that the architecture implements the checked dynamics.
+
+A revised run's **Review** view shows **What changed in this revision**, grouping source, formal interpretation, design, assumed domains/environment, scope, and provenance changes. The explanation includes the existing Z3 comparison evidence where available. Inspect newly permitted/forbidden valuations and changed premises before acknowledging the exact correction summary. A model that passes under stronger assumptions does not by itself justify those assumptions or authorize a source amendment.
+
+The service stores `candidate_inspection.json`, `candidate_provenance.json`, and `correction_summary.json` with the run's immutable artifacts. Binding decisions are appended to the review ledger and included in exported review packets. The structured editor uses `/api/behavior/inspect` and `/api/behavior/edit`; bindings use `/api/runs/{id}/bindings` and `/api/runs/{id}/bindings/reviews`.
+
 **Persistence and evidence**
 
-Runs are saved under `out/review_workbench` by default. Change this with `--data-dir` or `MBSE_REVIEW_DATA_DIR`. Source files, normalized requirements, interpretations, solver files, SysML, diagnostics, and review records survive a service restart. Browser-only edits and unsubmitted review text do not survive a page reload. A run interrupted by service shutdown is marked failed on restart; create a new run to retry it.
+Runs are saved under `out/review_workbench` by default. Change this with `--data-dir` or `MBSE_REVIEW_DATA_DIR`. Source files, normalized requirements, interpretations, solver files, SysML, diagnostics, execution settings, quality assessments, and review records survive a service restart. Browser-only edits and unsubmitted review text do not survive a page reload. A run whose owning process has stopped is marked failed when recovered; create a new run to retry it. A live CLI job using the same run store is not treated as an abandoned server run.
 
 Download individual artifacts or the JSON review packet from the GUI. Artifact downloads are checked against their recorded hashes. The JSON packet embeds the original input, generated SysML, SMT files, other text artifacts, their hashes, and the run/review records. It is self-contained for inspecting the saved evidence; it is not a ZIP archive. The frontend also uses `/api/config`, `/api/runs`, `/api/runs/{id}`, the run's `/reviews` and `/packet` endpoints, and `/api/runs/{id}/assumptions/{assumption_id}/reviews`.
 
@@ -135,6 +192,7 @@ From the repository root:
 ```bash
 python -m pip install -r requirements-review.txt httpx
 python -m unittest discover -s tests -v
+node tests/test_review_editor.js
 ```
 
 Tests cover units, solver evidence, compiler checks, source and behavior revisions, contract comparisons, review decisions, stale evidence, and packet exports. Checks requiring external tools or saved diagnostic fixtures skip when those prerequisites are absent.

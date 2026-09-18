@@ -55,6 +55,8 @@ class WorkbenchTests(unittest.TestCase):
                    'source_hash': run['source_hash'], 'evidence_hash': run['evidence_hash'], 'acknowledge': True,
                    'assumption_review_hash': run.get('assumption_review_hash'),
                    'contract_review_hash': run.get('contract_review_hash'),
+                   'architecture_binding_review_hash': run.get('architecture_binding_review_hash'),
+                   'correction_summary_sha256': (run.get('correction_summary') or {}).get('sha256'),
                    'acknowledge_contract_changes': bool(run.get('parent_run_id'))}
         payload.update(overrides)
         return self.client.post(f"/api/runs/{run['id']}/reviews", json=payload)

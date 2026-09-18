@@ -41,7 +41,7 @@ class AnalysisModeTests(unittest.TestCase):
         self.client.__enter__()
         self.addCleanup(self.directory.cleanup)
         self.addCleanup(self.client.__exit__, None, None, None)
-        compiler = patch('review_server.compile_sysml', return_value={'status': 'passed', 'diagnostics': []})
+        compiler = patch('review_workflow.compile_sysml', return_value={'status': 'passed', 'diagnostics': []})
         compiler.start()
         self.addCleanup(compiler.stop)
         actual_which = shutil.which
@@ -162,6 +162,8 @@ class AnalysisModeTests(unittest.TestCase):
         child = self.completed(analysis_mode='check_design', behavior=candidate, design_review=reviewed(parent),
                                parent_run_id=parent['id'], revision_rationale='Reviewed and replaced the speculative nominal value with a synthetic design value.')
         self.assertEqual(child['behavior_origin'], 'llm_proposed_reviewed')
+        # Lineage does not assert that newly edited equations came from the LLM.
+        self.assertEqual({r['provenance']['origin'] for r in child['candidate_inspection']['rows']}, {'unspecified'})
         self.assertEqual(child['behavioral_analysis']['status'], 'bounded_pass')
         self.assertEqual(child['design_review']['behavior_sha256'], child['contracts']['behavior_sha256'])
         self.assertEqual(child['design_review']['source_hash'], child['source_hash'])

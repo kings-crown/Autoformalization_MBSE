@@ -30,7 +30,7 @@ _LEX = re.compile(
     re.DOTALL,
 )
 _MODIFIERS = {"private", "public", "protected", "abstract", "individual", "ref", "in", "out", "inout", "standard", "library"}
-_DECLARATIONS = {"package", "part", "attribute", "requirement", "constraint", "subject"}
+_DECLARATIONS = {"package", "part", "port", "attribute", "requirement", "constraint", "subject"}
 
 
 def _unquote(value: str) -> str:

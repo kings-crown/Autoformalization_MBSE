@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Thin wrapper around requirements_pipeline.py with friendlier error reporting.
+Legacy generator wrapper with friendlier error reporting.
+
+The shared CLI/GUI workflow is available through requirements_pipeline.py directly.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ class FailureDiagnosis:
 def _parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(
         description=(
-            "Run requirements_pipeline.py with a user-friendly report layer "
+            "Run requirements_pipeline.py legacy with a user-friendly report layer "
             "for conflicts and common failure modes."
         )
     )
@@ -97,6 +99,7 @@ def _build_pipeline_cmd(args: argparse.Namespace, passthrough: Sequence[str]) ->
     cmd = [
         sys.executable,
         str(_pipeline_script_path()),
+        "legacy",
         "--statement",
         str(args.statement),
         "--output-prefix",

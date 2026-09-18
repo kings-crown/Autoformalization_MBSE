@@ -103,7 +103,7 @@ class ProposalOptInTests(unittest.TestCase):
                 (Path(directory) / 'pipeline_source_requirements.json').write_text(json.dumps(requirements))
                 environment = {'MBSE_REVIEW_CAPTURE_DIR': directory, 'CODEX_MBSE_MODEL': 'fixture-model',
                                'MBSE_REVIEW_PROPOSE_BEHAVIOR': flag, 'MBSE_REVIEW_ANALYSIS_MODE': mode}
-                with patch.dict(os.environ, environment), patch.object(adapter.legacy, 'main'), patch.object(adapter.legacy, '_codex_chat_text', AsyncMock()), patch.object(adapter.legacy, '_build_tlf_payload', Mock()), patch('review_behavior_proposal.propose_behavior', AsyncMock()) as proposer:
+                with patch.dict(os.environ, environment), patch.object(adapter.legacy, 'legacy_main'), patch.object(adapter.legacy, '_codex_chat_text', AsyncMock()), patch.object(adapter.legacy, '_build_tlf_payload', Mock()), patch('review_behavior_proposal.propose_behavior', AsyncMock()) as proposer:
                     runpy.run_path(str(script), run_name='__main__')
                     self.assertEqual(proposer.await_count, expected)
                     if expected:
@@ -217,7 +217,7 @@ class SmtReplayTests(unittest.TestCase):
             ("(set-logic QF_LRA)\n(declare-const voltage Real)\n(assert (>= voltage 10.5))\n(check-sat)\n", "sat", "voltage"),
             ("(declare-const x Int)\n(assert (! (> x 5) :named req_R1))\n(assert (! (< x 2) :named req_R2))\n(check-sat)\n", "unsat", "req_R1 req_R2"),
         ]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch.object(adapter.legacy, "_SOLVER_RUNNER", adapter.legacy.Z3Runner()):
             for fragment, verdict, expected in cases:
                 with self.subTest(verdict=verdict):
                     result = adapter._recheck(fragment, Path(directory))

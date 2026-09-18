@@ -82,7 +82,7 @@ if __name__ == '__main__':
         raise SystemExit('MBSE_REVIEW_CAPTURE_DIR must identify this run directory.')
     install_capture(Path(location).resolve())
     install_tlr_capture(Path(location).resolve())
-    legacy.main()
+    legacy.legacy_main()
     if (os.environ.get('MBSE_REVIEW_PROPOSE_BEHAVIOR') == '1'
             and os.environ.get('MBSE_REVIEW_ANALYSIS_MODE') == 'propose_design'):
         from review_behavior_proposal import propose_behavior

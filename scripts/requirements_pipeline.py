@@ -1,36 +1,20 @@
 #!/usr/bin/env python3
-"""
-End-to-end pipeline that
+"""Requirements-to-SysML command entry point and legacy generation library.
 
-1. Formalizes requirement intent into a normalized requirement-set scaffold (default).
-2. Translates a requirements text fragment into natural language, lemma, and SMT artefacts.
-3. Validates both SAT and UNSAT variants with Z3.
-4. Emits a SysML v2 textual model tying the requirement to the solver artefacts.
-5. Optionally compiles the SysML model with the SysML v2 kernel to ensure it loads cleanly.
+The default command (also ``run``) uses the same review_workflow engine as the
+GUI: python scripts/requirements_pipeline.py --statement requirements.csv
+Select ``--engine pipeline`` for the audited Codex generation profile. The local
+constraint engine and requirements-only analysis are the shared defaults.
 
-Example:
+The original generator remains available through the explicit ``legacy`` command:
+    python scripts/requirements_pipeline.py legacy --statement requirements.csv \
+        --output-prefix out/example --sysml-output out/example.sysml
+Its optional intent formalization, provider selection, repair policy and SysML
+modes are separate from the shared review profile. Utility subcommands
+``translate``, ``harvest`` and ``formalize_intent`` are retained.
 
-    OPENAI_API_KEY=sk-... python scripts/requirements_pipeline.py \\
-        --statement examples/pure/eirene_fun7_harvest_requirements_top10.csv \\
-        --output-prefix out/eirene_fun7_top10_openai \\
-        --sysml-output out/EIRENE_FUN7_top10_openai.sysml
-
-Codex CLI provider (no OpenAI API key required):
-
-    python scripts/requirements_pipeline.py \\
-        --llm-provider codex --model gpt-5.4 \\
-        --statement examples/pure/eirene_fun7_harvest_requirements_top11.csv \\
-        --output-prefix out/eirene_fun7_top11_codex \\
-        --sysml-output out/EIRENE_FUN7_top11_codex.sysml --skip-sysml-compile
-
-Environment overrides:
-    * SYSML_KERNEL_JAR – path to jupyter-sysml-kernel-*.jar (auto-detected if unset).
-    * SYSML_EXIT_COMMAND – command used to terminate the interactive session (default ':exit!').
-    * MBSE_ARCH_TEMPLATE – optional JSON scaffold for architecture-mode Domain IR.
-
-Unified entrypoint note:
-    This script is the authoritative CLI and accepts `translate`, `harvest`, and
-    `formalize_intent` commands in addition to full pipeline mode.
+This module also supplies the existing generation and solver functions used by
+the shared workflow. SYSML_KERNEL_JAR and MBSE_SOLVER configure installed tools.
 """
 
 from __future__ import annotations
@@ -47,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -1476,12 +1461,51 @@ Informal proof sketch (use as guidance for invariants):
     return response.choices[0].message.content.strip()
 
 
-def run_z3_fragment(fragment: str) -> Dict[str, Any]:
-    """Execute the SMT-LIB fragment with Z3 and capture diagnostics."""
-    z3_path = os.getenv("Z3_PATH", "z3")
+# ---------------------------------------------------------------------------
+# Solver seam: pluggable SMT-LIB runners (z3 / cvc5 / portfolio cross-check).
+#
+# Every caller goes through run_z3_fragment(); its return contract is unchanged
+# (status/exit_code/diagnostics on error, status/result/stderr on success). The
+# active runner is selected by MBSE_SOLVER={z3|cvc5|portfolio}; the default (z3)
+# reproduces the previous behaviour. Extra keys ("solver", "cross_check") are
+# additive and ignored by existing callers.
+# ---------------------------------------------------------------------------
+
+
+def ensure_set_logic(fragment: str, logic: str = "QF_LIA") -> str:
+    """Insert a ``(set-logic ...)`` line if absent, after any leading options.
+
+    Idempotent. Without a logic line a fragment (a) silently skips
+    ``sanitize_qf_lia_fragment`` (which is gated on the literal string), (b)
+    persists as a non-portable artefact, and (c) makes cvc5 fall back to the
+    full logic. ``logic`` is the hook for future theory expansion (e.g.
+    ``QF_LRA``); ``QF_LIA`` matches the current generator prompt.
+    """
+    if re.search(r"\(set-logic\b", fragment, re.IGNORECASE):
+        return fragment
+    lines = fragment.splitlines()
+    insert_at = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(";"):
+            continue
+        if stripped.startswith("(set-option"):
+            insert_at = index + 1  # keep set-logic after option declarations
+            continue
+        break  # first real declaration reached
+    lines.insert(insert_at, f"(set-logic {logic})")
+    return "\n".join(lines)
+
+
+def _exec_solver(argv: List[str], fragment: str, *, name: str) -> Dict[str, Any]:
+    """Run an SMT-LIB fragment through a solver binary over stdin.
+
+    Shared subprocess + diagnostics handling so every SolverRunner reports
+    errors identically. Preserves the original run_z3_fragment result contract.
+    """
     try:
         proc = subprocess.run(  # noqa: S603, S607
-            [z3_path, "-in"],
+            argv,
             input=fragment.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1492,28 +1516,29 @@ def run_z3_fragment(fragment: str) -> Dict[str, Any]:
         return {
             "status": "error",
             "exit_code": None,
-            "diagnostics": f"Z3 executable not found: {z3_path} ({exc})",
+            "diagnostics": f"{name} executable not found: {argv[0]} ({exc})",
+            "solver": name,
         }
     except subprocess.TimeoutExpired:
         return {
             "status": "error",
             "exit_code": None,
-            "diagnostics": f"Z3 timed out after {SMT_SOLVER_TIMEOUT} seconds.",
+            "diagnostics": f"{name} timed out after {SMT_SOLVER_TIMEOUT} seconds.",
+            "solver": name,
         }
 
     stdout = proc.stdout.decode("utf-8", errors="replace").strip()
     stderr = proc.stderr.decode("utf-8", errors="replace").strip()
     lower_out = stdout.lower()
     lower_err = stderr.lower()
-    error_detected = proc.returncode != 0 or "error" in lower_out or "error" in lower_err
-
-    if error_detected:
+    if proc.returncode != 0 or "error" in lower_out or "error" in lower_err:
         diagnostics_parts = [part for part in (stdout, stderr) if part]
-        diagnostics = "\n".join(diagnostics_parts) or f"Z3 exited with code {proc.returncode}."
+        diagnostics = "\n".join(diagnostics_parts) or f"{name} exited with code {proc.returncode}."
         return {
             "status": "error",
             "exit_code": proc.returncode,
             "diagnostics": diagnostics.strip(),
+            "solver": name,
         }
 
     return {
@@ -1521,8 +1546,45 @@ def run_z3_fragment(fragment: str) -> Dict[str, Any]:
         "exit_code": proc.returncode,
         "result": stdout,
         "stderr": stderr or None,
+        "solver": name,
     }
 
+
+class SolverRunner(ABC):
+    """Strategy interface for executing an SMT-LIB fragment."""
+
+    name: str
+
+    @abstractmethod
+    def run(self, fragment: str) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class Z3Runner(SolverRunner):
+    """Run fragments through the Z3 binary (default, unchanged behaviour)."""
+
+    name = "z3"
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        self.path = path or os.getenv("Z3_PATH", "z3")
+
+    def run(self, fragment: str) -> Dict[str, Any]:
+        return _exec_solver([self.path, "-in"], fragment, name=self.name)
+
+
+class Cvc5Runner(SolverRunner):
+    """Run fragments through the cvc5 binary."""
+
+    name = "cvc5"
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        self.path = path or os.getenv("CVC5_PATH", "cvc5")
+
+    def run(self, fragment: str) -> Dict[str, Any]:
+        # --incremental is required for the check-sat-assuming probes used in
+        # pairwise conflict detection; --produce-unsat-cores mirrors the header.
+        argv = [self.path, "--lang=smt2", "--incremental", "--produce-unsat-cores"]
+        return _exec_solver(argv, fragment, name=self.name)
 
 
 def _solver_verdict(result: Dict[str, Any]) -> Optional[str]:
@@ -1535,6 +1597,74 @@ def _solver_verdict(result: Dict[str, Any]) -> Optional[str]:
             return token
     return None
 
+
+class PortfolioRunner(SolverRunner):
+    """Run two solvers and cross-check their verdicts.
+
+    Returns the primary runner's result (preserving the caller contract) with an
+    additive ``cross_check`` entry. A sat/unsat disagreement is a faithfulness
+    alert: two independent solvers read the same fragment differently.
+    """
+
+    name = "portfolio"
+
+    def __init__(self, primary: SolverRunner, secondary: SolverRunner) -> None:
+        self.primary = primary
+        self.secondary = secondary
+
+    def run(self, fragment: str) -> Dict[str, Any]:
+        primary_result = self.primary.run(fragment)
+        secondary_result = self.secondary.run(fragment)
+        primary_verdict = _solver_verdict(primary_result)
+        secondary_verdict = _solver_verdict(secondary_result)
+
+        cross_check: Dict[str, Any] = {
+            self.primary.name: primary_verdict,
+            self.secondary.name: secondary_verdict,
+            "agree": primary_verdict is not None and primary_verdict == secondary_verdict,
+        }
+        if (
+            primary_verdict is not None
+            and secondary_verdict is not None
+            and primary_verdict != secondary_verdict
+        ):
+            cross_check["alert"] = (
+                f"Solver disagreement: {self.primary.name}={primary_verdict} vs "
+                f"{self.secondary.name}={secondary_verdict} — fragment interpreted "
+                f"differently by two independent solvers."
+            )
+        elif secondary_verdict is None:
+            cross_check["note"] = (
+                f"Secondary solver '{self.secondary.name}' produced no verdict "
+                f"(status={secondary_result.get('status')}); cross-check skipped."
+            )
+
+        result = dict(primary_result)
+        result["cross_check"] = cross_check
+        return result
+
+
+def build_solver_runner() -> SolverRunner:
+    """Select the active runner from MBSE_SOLVER ({z3|cvc5|portfolio})."""
+    choice = os.getenv("MBSE_SOLVER", "z3").strip().lower()
+    if choice == "cvc5":
+        return Cvc5Runner()
+    if choice == "portfolio":
+        return PortfolioRunner(Z3Runner(), Cvc5Runner())
+    return Z3Runner()
+
+
+_SOLVER_RUNNER: SolverRunner = build_solver_runner()
+
+
+def run_z3_fragment(fragment: str) -> Dict[str, Any]:
+    """Execute the SMT-LIB fragment with the active solver and capture diagnostics.
+
+    Name retained for backward compatibility. The active runner is selected by
+    MBSE_SOLVER; ensure_set_logic is applied (idempotent) so every probe carries
+    a logic declaration regardless of which call site assembled the fragment.
+    """
+    return _SOLVER_RUNNER.run(ensure_set_logic(fragment))
 
 
 def _is_numeric_token(token: str) -> bool:
@@ -2468,6 +2598,7 @@ async def generate_validated_smt_fragment(
             requirement_ids=requirement_ids,
         )
         clean_fragment = strip_code_fences(fragment)
+        clean_fragment = ensure_set_logic(clean_fragment)
         clean_fragment, sanitation_notes = sanitize_qf_lia_fragment(clean_fragment)
         validation = await asyncio.to_thread(run_z3_fragment, clean_fragment)
         iterations.append({
@@ -6529,7 +6660,7 @@ def _run_toolkit_subcommand(argv: Sequence[str]) -> None:
         sys.stdout.write("\n")
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
+def legacy_main(argv: Optional[Sequence[str]] = None) -> None:
     cli_argv = list(argv) if argv is not None else list(sys.argv[1:])
     if cli_argv and cli_argv[0] in _delegated_toolkit_commands():
         _run_toolkit_subcommand(cli_argv)
@@ -6551,5 +6682,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         print(f"  {key}: {value}")
 
 
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Dispatch the shared review workflow; keep legacy generation explicit."""
+    cli_argv = list(argv) if argv is not None else list(sys.argv[1:])
+    if cli_argv and cli_argv[0] in _delegated_toolkit_commands():
+        _run_toolkit_subcommand(cli_argv)
+        return
+    if cli_argv and cli_argv[0] == "legacy":
+        legacy_main(cli_argv[1:])
+        return
+    from review_cli import main as review_main
+    if cli_argv and cli_argv[0] == "run":
+        cli_argv = cli_argv[1:]
+    raise SystemExit(review_main(cli_argv))
+
+
 if __name__ == "__main__":
+    # Reuse this instance when the shared workflow imports generator helpers.
+    sys.modules.setdefault("requirements_pipeline", sys.modules[__name__])
     main()
