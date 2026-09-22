@@ -1686,28 +1686,19 @@ def _line_has_bilinear_product(line: str) -> bool:
 
 
 def sanitize_qf_lia_fragment(fragment: str) -> tuple[str, List[str]]:
-    """
-    Remove clearly non-linear assertions from a QF_LIA fragment.
+    """Preserve generated assertions; report unsupported nonlinear content.
 
-    The generator is prompted to emit QF_LIA, but LLM output can still include
-    bilinear terms like `(* x y)`. Z3 rejects those under QF_LIA.
-    We conservatively drop only assertion lines that contain symbolic*symbolic
-    products, keeping the rest of the fragment unchanged.
+    This legacy compatibility hook must never repair a theory mismatch by
+    deleting an obligation. Z3/the encoding diagnostics decide validity.
     """
     if not _is_qf_lia_fragment(fragment):
         return fragment, []
-
-    notes: List[str] = []
-    kept_lines: List[str] = []
+    notes = []
     for line in fragment.splitlines():
         stripped = line.strip()
         if stripped.startswith("(assert") and "(*" in stripped and _line_has_bilinear_product(stripped):
-            notes.append(f"Dropped non-linear assertion under QF_LIA: {stripped}")
-            kept_lines.append("; dropped non-linear assertion (symbolic multiplication) for QF_LIA compatibility")
-            continue
-        kept_lines.append(line)
-    sanitized = "\n".join(kept_lines)
-    return sanitized, notes
+            notes.append("Non-linear assertion preserved under QF_LIA; requires a supported encoding: " + stripped)
+    return fragment, notes
 
 
 # ---------------------------------------------------------------------------
@@ -1777,20 +1768,28 @@ def _extract_smt_symbols(fragment: str) -> set[str]:
 
 
 def _extract_named_assertions(fragment: str) -> Dict[str, str]:
-    """Extract named assertion blocks ``(assert (! ... :named req_XXX))`` from the fragment.
+    """Extract formulas from complete top-level ``:named req_*`` assertions.
 
-    Returns a mapping from the sanitised requirement ID to the full assertion line.
+    Parsing complete commands prevents a named background assertion from being
+    consumed together with a later requirement. Quoted requirement names are
+    accepted consistently with the semantic-context parser; comments and other
+    named assertions do not become requirement formulas.
     """
     named: Dict[str, str] = {}
-    for match in re.finditer(
-        r"\(assert\s+\(!\s+(.*?)\s+:named\s+(req_\S+)\s*\)\s*\)",
-        fragment,
-        flags=re.DOTALL,
-    ):
-        formula = match.group(1).strip()
-        name = match.group(2).strip()
-        req_key = name[4:] if name.startswith("req_") else name  # strip 'req_' prefix
-        named[req_key] = formula
+    for _, command in _semantic_probe_commands(fragment):
+        if command[0] != "assert" or len(command) != 2:
+            continue
+        expression = command[1]
+        if not isinstance(expression, list) or len(expression) < 2 or expression[0] != "!":
+            continue
+        attributes = expression[2:]
+        name = next((attributes[index + 1] for index, attribute in enumerate(attributes[:-1])
+                     if attribute == ":named" and isinstance(attributes[index + 1], str)), None)
+        if name is None:
+            continue
+        name = name.strip("|")
+        if name.startswith("req_"):
+            named[name[4:]] = _semantic_probe_render(expression[1])
     return named
 
 
@@ -2651,7 +2650,7 @@ async def write_smt_outputs(
     if unsat_extra is not None:
         unsat_extra = unsat_extra.strip()
         if not unsat_extra:
-            unsat_extra = "(assert false)"
+            raise ValueError("A negative query requires explicit additional assertions; no artificial contradiction is generated.")
         unsat_text = prepare_unsat_variant(sat_text, unsat_extra)
         unsat_path = parent / f"{base_name}_unsat.smt2"
         unsat_path.write_text(unsat_text, encoding="utf-8")
@@ -2870,8 +2869,6 @@ async def run_translate_flow(
     tlr_file: Optional[str] = None
     if smt_prefix:
         default_unsat = unsat_extra
-        if default_unsat is None:
-            default_unsat = "; Auto-generated contradiction\n(assert false)"
         tlr_file = write_tlf_output(smt_prefix, typed_requirements_form)
         smt_files = await write_smt_outputs(
             prefix=smt_prefix,
@@ -6683,7 +6680,7 @@ def legacy_main(argv: Optional[Sequence[str]] = None) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Dispatch the shared review workflow; keep legacy generation explicit."""
+    """Run the canonical research CLI; older review and generator modes are explicit."""
     cli_argv = list(argv) if argv is not None else list(sys.argv[1:])
     if cli_argv and cli_argv[0] in _delegated_toolkit_commands():
         _run_toolkit_subcommand(cli_argv)
@@ -6691,10 +6688,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if cli_argv and cli_argv[0] == "legacy":
         legacy_main(cli_argv[1:])
         return
-    from review_cli import main as review_main
-    if cli_argv and cli_argv[0] == "run":
-        cli_argv = cli_argv[1:]
-    raise SystemExit(review_main(cli_argv))
+    if cli_argv and cli_argv[0] == "review":
+        from review_cli import main as review_main
+        raise SystemExit(review_main(cli_argv[1:]))
+    from canonical_cli import main as canonical_main
+    raise SystemExit(canonical_main(cli_argv))
 
 
 if __name__ == "__main__":

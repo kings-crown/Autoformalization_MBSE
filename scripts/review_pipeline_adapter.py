@@ -363,7 +363,7 @@ def run_existing_pipeline(
         "semantic_limitations": semantic_limitations,
         "sanitation_notes": sanitation_notes,
         "elapsed_seconds": round(time.monotonic() - started, 2),
-        "artificial_unsat_note": "The legacy negative query appends assert false. It is retained as a diagnostic artifact and is not safety evidence.",
+        "negative_query_note": "No negative query is synthesized without an explicit obligation; consistency is separate from safety evidence.",
     }
     notify("analysis", "failed" if semantic_blocker else "partial" if semantic_limitations and verdict in {"sat", "unsat"} else "complete" if verdict in {"sat", "unsat"} else "failed", summary)
     model_result = None
