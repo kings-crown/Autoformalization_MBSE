@@ -27,9 +27,9 @@ New canonical runs are stored under `out/review_workbench/canonical` by default.
                               v
   +---------------------------------------------------------+
   | 1. PREPARE SOURCE                                       |
-  | Source-check wording and collect relevant context        |
-  | Retain definitions, conditions, exceptions, dependencies |
-  | Record unresolved questions                              |
+  | Source-check wording and collect relevant context       |
+  | Retain definitions, conditions, exceptions, dependencies|
+  | Record unresolved questions                             |
   +---------------------------+-----------------------------+
                               |
              Prepared requirements and source context
@@ -37,16 +37,16 @@ New canonical runs are stored under `out/review_workbench/canonical` by default.
                               |
                               v
   +---------------------------------------------------------+
-  | 2. CONVERT THROUGH THE CANONICAL CLI CORE                |
+  | 2. CONVERT THROUGH THE CANONICAL CLI CORE               |
   |                                                         |
-  | A: source -> LLM -> SysML -> compiler                    |
+  | A: source -> LLM -> SysML -> compiler                   |
   |                                                         |
-  | B/C: source -> LLM -> TLR -> type/unit checks             |
+  | B/C: source -> LLM -> TLR -> type/unit checks           |
   |                        |                                |
   |                  shared expressions                     |
   |                   /             \                       |
   |                  v               v                      |
-  |            SysML/compiler   C: SMT/Z3 audits             |
+  |            SysML/compiler   C: SMT/Z3 audits            |
   |                   \             /                       |
   |                    optional feedback                    |
   |                           |                             |
@@ -60,10 +60,10 @@ New canonical runs are stored under `out/review_workbench/canonical` by default.
                               |
                               v
   +---------------------------------------------------------+
-  | 3. EVALUATE SEPARATELY                                   |
+  | 3. EVALUATE SEPARATELY                                  |
   | Explicit mutation manifest -> formal comparisons        |
   | Changed sources -> separate declared C generation trials|
-  | Keep outcomes, missing evidence, cost and latency        |
+  | Keep outcomes, missing evidence, cost and latency       |
   +---------------------------+-----------------------------+
                               |
               Engineer inspection and recorded opinion
