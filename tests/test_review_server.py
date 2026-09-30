@@ -211,5 +211,23 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/runs/not-a-run').status_code, 404)
 
 
+class CanonicalRoutingTests(unittest.TestCase):
+    def test_default_page_and_legacy_routes_keep_origin_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(Path(directory))
+            with TestClient(app) as client:
+                page = client.get('/')
+                self.assertEqual(page.status_code, 200)
+                self.assertIn("const API='/api/workflow'", page.text)
+                self.assertEqual(client.get('/legacy').status_code, 200)
+                self.assertEqual(client.get('/api/config').status_code, 200)
+                self.assertEqual(client.get('/api/workflow/config').status_code, 200)
+                self.assertEqual(client.get('/api/workflow/runs').json(), [])
+                response = client.post('/api/workflow/runs', json={'text': 'A source requirement'},
+                                       headers={'Origin': 'https://unrelated.example'})
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(client.get('/api/workflow/runs').json(), [])
+
+
 if __name__ == '__main__':
     unittest.main()

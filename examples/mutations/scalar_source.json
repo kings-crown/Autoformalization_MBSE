@@ -1,0 +1,190 @@
+{
+  "schema": "mutation_campaign/1",
+  "id": "scalar-source-demo",
+  "reference": {
+    "status": "constructed_fixture",
+    "author": "Prototype example authors",
+    "description": "Synthetic requirements and explicitly specified reference formulas for exercising mutation tooling. Not observed engineering defects or independently validated system requirements."
+  },
+  "context": {
+    "variables": [
+      {
+        "name": "voltage",
+        "type": "Real",
+        "unit": "V"
+      },
+      {
+        "name": "mass",
+        "type": "Real",
+        "unit": "kg"
+      }
+    ],
+    "background": []
+  },
+  "requirements": [
+    {
+      "id": "VOLTAGE",
+      "text": "The battery shall have a voltage of at most 28 V.",
+      "source": {
+        "document": "Synthetic mutation demonstration",
+        "location": "clause 1",
+        "provenance": "Constructed regression fixture."
+      },
+      "formula": {
+        "op": "<=",
+        "args": [
+          {
+            "var": "voltage"
+          },
+          {
+            "value": "28",
+            "unit": "V"
+          }
+        ]
+      },
+      "binding": {
+        "variable": "voltage",
+        "subject": "battery",
+        "quantity": "voltage",
+        "kind": "quantity",
+        "trigger": "",
+        "response": ""
+      }
+    },
+    {
+      "id": "MASS",
+      "text": "The device shall have a mass of at most 2 kg.",
+      "source": {
+        "document": "Synthetic mutation demonstration",
+        "location": "clause 2",
+        "provenance": "Constructed regression fixture."
+      },
+      "formula": {
+        "op": "<=",
+        "args": [
+          {
+            "var": "mass"
+          },
+          {
+            "value": "2",
+            "unit": "kg"
+          }
+        ]
+      },
+      "binding": {
+        "variable": "mass",
+        "subject": "device",
+        "quantity": "mass",
+        "kind": "quantity",
+        "trigger": "",
+        "response": ""
+      }
+    }
+  ],
+  "variants": [
+    {
+      "id": "voltage-relaxed",
+      "requirement_id": "VOLTAGE",
+      "kind": "mutant",
+      "category": "limit_violation",
+      "eligibility": "The source has a scalar upper bound.",
+      "rationale": "Raise the bound by one canonical unit.",
+      "expected_relation": "weakened",
+      "mutation": {
+        "operator": "shift_bound",
+        "value": "1"
+      },
+      "text": "The battery shall have a voltage of at most 29 V."
+    },
+    {
+      "id": "voltage-strict",
+      "requirement_id": "VOLTAGE",
+      "kind": "mutant",
+      "category": "limit_violation",
+      "eligibility": "The upper bound includes its exact endpoint.",
+      "rationale": "Exclude the previously allowed boundary value.",
+      "expected_relation": "strengthened",
+      "mutation": {
+        "operator": "flip_boundary"
+      },
+      "text": "The battery shall have a voltage of less than 28 V."
+    },
+    {
+      "id": "voltage-unit-control",
+      "requirement_id": "VOLTAGE",
+      "kind": "control",
+      "category": "equivalent_control",
+      "eligibility": "The supported scaled unit converts exactly to the canonical unit.",
+      "rationale": "Preserve the quantity, bound, and endpoint inclusion through exact conversion.",
+      "expected_relation": "equivalent",
+      "mutation": {
+        "operator": "explicit",
+        "value": {
+          "op": "<=",
+          "args": [
+            {
+              "var": "voltage"
+            },
+            {
+              "value": "28000",
+              "unit": "mV"
+            }
+          ]
+        }
+      },
+      "text": "The battery shall have a voltage of at most 28000 mV."
+    },
+    {
+      "id": "mass-relaxed",
+      "requirement_id": "MASS",
+      "kind": "mutant",
+      "category": "limit_violation",
+      "eligibility": "The source has a scalar upper bound.",
+      "rationale": "Raise the bound by one canonical unit.",
+      "expected_relation": "weakened",
+      "mutation": {
+        "operator": "shift_bound",
+        "value": "1"
+      },
+      "text": "The device shall have a mass of at most 3 kg."
+    },
+    {
+      "id": "mass-strict",
+      "requirement_id": "MASS",
+      "kind": "mutant",
+      "category": "limit_violation",
+      "eligibility": "The upper bound includes its exact endpoint.",
+      "rationale": "Exclude the previously allowed boundary value.",
+      "expected_relation": "strengthened",
+      "mutation": {
+        "operator": "flip_boundary"
+      },
+      "text": "The device shall have a mass of less than 2 kg."
+    },
+    {
+      "id": "mass-unit-control",
+      "requirement_id": "MASS",
+      "kind": "control",
+      "category": "equivalent_control",
+      "eligibility": "The supported scaled unit converts exactly to the canonical unit.",
+      "rationale": "Preserve the quantity, bound, and endpoint inclusion through exact conversion.",
+      "expected_relation": "equivalent",
+      "mutation": {
+        "operator": "explicit",
+        "value": {
+          "op": "<=",
+          "args": [
+            {
+              "var": "mass"
+            },
+            {
+              "value": "2000",
+              "unit": "g"
+            }
+          ]
+        }
+      },
+      "text": "The device shall have a mass of at most 2000 g."
+    }
+  ]
+}

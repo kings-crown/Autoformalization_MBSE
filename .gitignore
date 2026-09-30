@@ -4,3 +4,6 @@ out/
 results/
 SysML-v2-Release
 *.pptx
+__pycache__/
+*.py[cod]
+.pytest_cache/

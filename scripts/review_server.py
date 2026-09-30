@@ -55,6 +55,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     app.state.store = store
     app.state.executor = executor
+    # New requirements runs use the exact canonical CLI core. The earlier
+    # design-review UI and API remain available for existing saved artifacts.
+    from review_canonical import create_router as canonical_router
+    from review_evaluation import create_evaluation_router
+    workflow = canonical_router(store.root / "canonical", executor)
+    app.state.workflow_store = workflow.workflow_store
+    app.include_router(workflow)
+    app.include_router(create_evaluation_router(workflow.workflow_store, executor))
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")
@@ -71,6 +79,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/")
     def index():
+        return FileResponse(ROOT / "prototypes/review-workbench/canonical.html", media_type="text/html")
+
+    @app.get("/legacy")
+    def legacy_index():
         return FileResponse(ROOT / "prototypes/review-workbench/index.html", media_type="text/html")
 
     @app.get("/api/config")

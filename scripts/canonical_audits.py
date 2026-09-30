@@ -66,6 +66,8 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
             raise ValueError("solver must be a local Z3 executable name or path.")
         from canonical_tlr import validate_tlr, tlr_context
         normalized = validate_tlr(tlr)
+        from canonical_abstractions import representation_summary
+        result["representation"] = representation_summary(normalized)
         _write(directory / "tlr.json", normalized)
         rows = normalized["requirements"]
         supported = [row for row in rows if row["status"] == "supported"]

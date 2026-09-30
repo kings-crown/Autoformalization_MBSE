@@ -1,0 +1,33 @@
+{
+  "variables": [
+    {
+      "name": "battery_voltage",
+      "type": "Real",
+      "unit": "V",
+      "bounds": {
+        "lower": "0"
+      }
+    },
+    {
+      "name": "maintenance_mode",
+      "type": "Bool"
+    },
+    {
+      "name": "motion_enabled",
+      "type": "Bool"
+    },
+    {
+      "name": "charging_enabled",
+      "type": "Bool"
+    },
+    {
+      "name": "charging_current",
+      "type": "Real",
+      "unit": "A",
+      "bounds": {
+        "lower": "0"
+      }
+    }
+  ],
+  "background": []
+}

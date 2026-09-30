@@ -1,6 +1,18 @@
-**Requirements-to-SysML review workbench**
+# Requirements-to-SysML review workbench
 
-This local application connects requirement ingestion, generation, actual solver/compiler runs, and engineer review. Its frontend includes a model explorer, source-linked assumption decisions, and bounded behavioral evidence. The actual generated SysML stays visible beside the explorer with line numbers and raw download. Its frontend is [index.html](index.html); the HTTP service is [review_server.py](../../scripts/review_server.py). Both the GUI and default command-line entry point execute [review_workflow.py](../../scripts/review_workflow.py), using the same request schema, generation policy, evidence artifacts, and acceptance conditions.
+The main page at [http://127.0.0.1:8765](http://127.0.0.1:8765) now presents the canonical CLI workflow. It calls `canonical_cli.run_candidate` for direct or structured conversion, preserving prepared JSON source context, explicit repair/scenario settings, generated SysML, and exact check evidence. Mutation jobs operate on frozen inputs in separate evaluation records. Engineering opinions do not modify machine admission.
+
+The [canonical GUI guide](../../docs/GUI_CANONICAL_WORKFLOW.md) describes the current interface, setup, defaults, evidence interpretation, evaluation budgets, storage, and API. Its frontend is [canonical.html](canonical.html); the service is [review_server.py](../../scripts/review_server.py). Start it from the repository root:
+
+```bash
+python scripts/review_server.py
+```
+
+Canonical runs use `out/review_workbench/canonical` by default. The GUI defaults repair budgets to zero; select explicit options to match a particular CLI run. It shares conversion code, not identical storage wrappers or automatic import of standalone CLI output directories.
+
+## Earlier workbench and design-review compatibility
+
+The remainder of this document describes the earlier interface, available at [http://127.0.0.1:8765/legacy](http://127.0.0.1:8765/legacy). Its [index.html](index.html), `/api/...` endpoints, existing saved runs, and optional design checks remain available. These use [review_workflow.py](../../scripts/review_workflow.py), also selected by the explicit `requirements_pipeline.py review` command. Their legacy assumption/hash approval rules and heuristic profile do not apply to main-page canonical generation. New canonical requests use `/api/workflow/...`.
 
 **Run the application**
 
@@ -10,7 +22,7 @@ From the repository root, using the project Python environment:
 python scripts/review_server.py
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Opening the HTML file directly does not connect the backend. Stop the foreground service with Ctrl+C.
+Open [http://127.0.0.1:8765/legacy](http://127.0.0.1:8765/legacy) for this compatibility interface. Opening the HTML file directly does not connect the backend. Stop the foreground service with Ctrl+C.
 
 The web service requires FastAPI, Uvicorn, and Pydantic 2. The tested environment uses Python 3.13.12, FastAPI 0.136.3, Uvicorn 0.51.0, and Pydantic 2.13.4. To install those web dependencies into an environment you manage:
 
@@ -30,25 +42,25 @@ python scripts/review_server.py --port 8765 --data-dir /path/to/review-runs
 
 Use real installed paths in these overrides. Missing tools produce unavailable/not-run evidence, rather than a simulated pass. The service binds to `127.0.0.1`; it is a local research application, not an authenticated multiuser deployment.
 
-**Run the same workflow from the command line**
+**Run the earlier GUI workflow from the command line**
 
 With your requirements file, run:
 
 ```bash
-python scripts/requirements_pipeline.py \
+python scripts/requirements_pipeline.py review \
   --statement requirements.csv \
   --data-dir out/review_workbench
 ```
 
-The optional `run` subcommand is equivalent. The CLI accepts the same TXT, CSV, and JSON formats, and defaults to the same local engine and requirement-consistency mode. Use `--engine pipeline` for Codex generation. No server is needed to execute the CLI. Its saved run appears in the GUI when both use the same data directory.
+The explicit `review` command selects this compatibility workflow. It accepts the same TXT, CSV, and JSON formats as the GUI and defaults to the local engine and requirement-consistency mode. Add `--engine pipeline` for the workbench's existing Codex generation route. No server is needed to execute `review`; its saved run appears in the GUI when both use the same data directory.
 
-For a request containing a reviewed candidate, provenance, or revision details, `--request-json request.json` accepts the exact API request object. This file contains fields such as `text`, `format`, `engine`, and `analysis_mode`; it is distinct from a requirements JSON array supplied through `--statement`. Do not combine `--request-json` with request-setting flags. Flag-based candidate checks also support `--behavior`, `--candidate-provenance`, `--reviewer`, `--rationale`, and an explicit `--acknowledge-design`. All backend review and parent-evidence checks still apply. A CLI invocation does not accept the resulting model.
+For a request containing a reviewed candidate, provenance, or revision details, `python scripts/requirements_pipeline.py review --request-json request.json` accepts the exact API request object. This file contains fields such as `text`, `format`, `engine`, and `analysis_mode`; it is distinct from a requirements JSON array supplied through `--statement`. Do not combine `--request-json` with request-setting flags. Flag-based candidate checks also support `--behavior`, `--candidate-provenance`, `--reviewer`, `--rationale`, and an explicit `--acknowledge-design`. All backend review and parent-evidence checks still apply. A CLI invocation does not accept the resulting model.
 
-CLI stdout contains a JSON `run` and optional `exports`. Exit code `0` means the workflow completed; inspect solver/compiler verdicts separately. A completed run can contain an UNSAT conflict or a design counterexample. Exit code `1` denotes execution/export failure and `2` denotes invalid input. Optional `--output-prefix`, `--sysml-output`, and `--traceability-output` copy artifacts to new destinations outside the run store; they preserve the original saved evidence.
+The `review` command writes a JSON `run` and optional `exports` to stdout. Exit code `0` means the workflow completed; inspect solver/compiler verdicts separately. A completed run can contain an UNSAT conflict or a design counterexample. Exit code `1` denotes execution/export failure and `2` denotes invalid input. Optional `--output-prefix`, `--sysml-output`, and `--traceability-output` copy artifacts to new destinations outside the run store; they preserve the original saved evidence.
 
-Both interfaces record effective settings in `execution_config.json`, displayed in **Formalization quality**. The shared workflow preserves source wording and IDs and skips the legacy optional intent-drafting stage. The pipeline engine uses strict encoding diagnostics, disables semantic repair, permits one SMT correction attempt, and compiles the final SysML. The generator model and solver settings are recorded per run. Identical settings do not guarantee identical responses from separate LLM calls.
+The GUI and `review` command record effective settings in `execution_config.json`, displayed in **Formalization quality**. The shared workflow preserves source wording and IDs and skips the legacy optional intent-drafting stage. The pipeline engine uses strict encoding diagnostics, disables semantic repair, permits one SMT correction attempt, and compiles the final SysML. The generator model and solver settings are recorded per run. Identical settings do not guarantee identical responses from separate LLM calls.
 
-Older CSV generator controls now require `python scripts/requirements_pipeline.py legacy ...`. They are a separate compatibility path and do not create the shared GUI review lifecycle. Standalone `translate`, `harvest`, and `formalize_intent` utilities remain explicit commands. See the [main README](../../README.md#legacy-generator-and-utilities) for migration details.
+Older CSV generator controls now require `python scripts/requirements_pipeline.py legacy ...`. They are a separate compatibility path and do not create the shared GUI review lifecycle. Standalone `translate`, `harvest`, and `formalize_intent` utilities remain explicit commands. See the [main README](../../README.md#existing-gui-and-compatibility-commands) for migration details.
 
 **Choose an engine**
 
@@ -179,7 +191,7 @@ The service stores `candidate_inspection.json`, `candidate_provenance.json`, and
 
 **Persistence and evidence**
 
-Runs are saved under `out/review_workbench` by default. Change this with `--data-dir` or `MBSE_REVIEW_DATA_DIR`. Source files, normalized requirements, interpretations, solver files, SysML, diagnostics, execution settings, quality assessments, and review records survive a service restart. Browser-only edits and unsubmitted review text do not survive a page reload. A run whose owning process has stopped is marked failed when recovered; create a new run to retry it. A live CLI job using the same run store is not treated as an abandoned server run.
+Runs are saved under `out/review_workbench` by default. Change this with `--data-dir` or `MBSE_REVIEW_DATA_DIR`. Source files, normalized requirements, interpretations, solver files, SysML, diagnostics, execution settings, quality assessments, and review records survive a service restart. Browser-only edits and unsubmitted review text do not survive a page reload. A run whose owning process has stopped is marked failed when recovered; create a new run to retry it. A live `review` CLI job using the same run store is not treated as an abandoned server run.
 
 Download individual artifacts or the JSON review packet from the GUI. Artifact downloads are checked against their recorded hashes. The JSON packet embeds the original input, generated SysML, SMT files, other text artifacts, their hashes, and the run/review records. It is self-contained for inspecting the saved evidence; it is not a ZIP archive. The frontend also uses `/api/config`, `/api/runs`, `/api/runs/{id}`, the run's `/reviews` and `/packet` endpoints, and `/api/runs/{id}/assumptions/{assumption_id}/reviews`.
 
@@ -195,11 +207,11 @@ python -m unittest discover -s tests -v
 node tests/test_review_editor.js
 ```
 
-Tests cover units, solver evidence, compiler checks, source and behavior revisions, contract comparisons, review decisions, stale evidence, and packet exports. Checks requiring external tools or saved diagnostic fixtures skip when those prerequisites are absent.
+Tests cover units, solver evidence, compiler checks, source and behavior revisions, contract comparisons, review decisions, stale evidence, and packet exports. Checks requiring external solver/compiler tools skip when those tools are unavailable; regression fixtures are supplied by the test suite.
 
 ### Native TLR preflight
 
-Before LLM generation, the pipeline builds and strictly typechecks a heuristic requirements TLR. Numeric observations that cannot be bound to a numeric quantity are retained in `unresolved_ranges`, with the complete original clause, numeric mentions, and an explicit non-executable status. They are not cast onto Boolean requirement placeholders or presented as verified bounds. This preserves category-specific deadlines and population conditions such as “95% of messages” for explicit interpretation.
+Before LLM generation, the workbench's existing pipeline builds and strictly typechecks a heuristic requirements TLR. Numeric observations that cannot be bound to a numeric quantity are retained in `unresolved_ranges`, with the complete original clause, numeric mentions, and an explicit non-executable status. They are not cast onto Boolean requirement placeholders or presented as verified bounds. This preserves category-specific deadlines and population conditions such as “95% of messages” for explicit interpretation.
 
 `initial_tlr.json` is saved before provider calls. A later generation failure therefore leaves the native candidate available for inspection; the GUI identifies this fallback as native preflight and partial. Unresolved numeric bindings appear in the assumption ledger and remain pending review. Invalid arithmetic on Boolean symbols still fails native typechecking.
 

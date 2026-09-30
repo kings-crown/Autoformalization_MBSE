@@ -1,0 +1,104 @@
+{
+  "schema": "mbse_tlr/1",
+  "abstraction_policy": "mbse_abstraction/1",
+  "variables": [
+    {
+      "name": "unicast_send_available",
+      "type": "Bool",
+      "description": "The messaging service offers an operation for sending a unicast message to a specified address."
+    },
+    {
+      "name": "unicast_received",
+      "type": "Bool",
+      "description": "The selected unicast message is received in the selected symbolic occurrence."
+    },
+    {
+      "name": "receiving_address",
+      "type": "Int",
+      "description": "Opaque identity of the receiving address for that same selected message; only equality has meaning."
+    },
+    {
+      "name": "specified_address",
+      "type": "Int",
+      "description": "Opaque identity of that selected message's specified destination address; only equality has meaning."
+    },
+    {
+      "name": "ttl_configuration_available",
+      "type": "Bool",
+      "description": "The messaging service offers an operation for configuring multicast message TTL, defined as hop count."
+    }
+  ],
+  "assumptions": [],
+  "requirements": [
+    {
+      "id": "MSG-SEND",
+      "status": "supported",
+      "formula": {
+        "var": "unicast_send_available"
+      },
+      "abstraction": {
+        "kind": "capability",
+        "subject": "messaging service",
+        "operation": "Send a unicast message to its specified address",
+        "symbol": "unicast_send_available",
+        "meaning": "The source-required unicast sending function must be available.",
+        "scope": "Availability of the named messaging function; no particular invocation is asserted.",
+        "limitations": [
+          "No deployed implementation or successful execution is established.",
+          "No delivery, timing, numeric range or network failure semantics is introduced."
+        ]
+      }
+    },
+    {
+      "id": "MSG-RECIPIENT",
+      "status": "supported",
+      "formula": {
+        "op": "implies",
+        "args": [
+          {
+            "var": "unicast_received"
+          },
+          {
+            "op": "=",
+            "args": [
+              {
+                "var": "receiving_address"
+              },
+              {
+                "var": "specified_address"
+              }
+            ]
+          }
+        ]
+      },
+      "abstraction": {
+        "kind": "event_relation",
+        "meaning": "If this selected message is received, its receiving address must match its specified address.",
+        "scope": "One symbolic reception occurrence and two opaque address identities referring to the same message.",
+        "limitations": [
+          "Receipt is not required to occur; no eventual delivery, order or history guarantee is established.",
+          "This declares an address-equality abstraction; concrete endpoint mapping and implementation realization remain outside the example."
+        ]
+      }
+    },
+    {
+      "id": "MSG-TTL",
+      "status": "supported",
+      "formula": {
+        "var": "ttl_configuration_available"
+      },
+      "abstraction": {
+        "kind": "capability",
+        "subject": "messaging service",
+        "operation": "Configure the multicast message TTL hop count",
+        "symbol": "ttl_configuration_available",
+        "meaning": "The source-required TTL configuration function must be available; TTL is a hop count, not elapsed time.",
+        "scope": "Availability of the named messaging function; no particular invocation is asserted.",
+        "limitations": [
+          "No deployed implementation or successful execution is established.",
+          "No delivery, timing, numeric range or network failure semantics is introduced."
+        ]
+      }
+    }
+  ]
+}

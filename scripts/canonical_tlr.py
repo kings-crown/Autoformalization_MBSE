@@ -12,9 +12,9 @@ import re
 from typing import Any
 
 from mutation_core import validate_context, validate_formula
+from canonical_abstractions import POLICY_VERSION, PROFILE, validate_abstraction
 
 SCHEMA = "mbse_tlr/1"
-PROFILE = "Current-state Boolean and linear integer/real constraints; no temporal or probabilistic operators."
 
 
 def _keys(value: Any, allowed: set[str], required: set[str], label: str) -> None:
@@ -39,7 +39,7 @@ def _references(ast: Any) -> set[str]:
     return set().union(*(_references(a) for a in ast.get("args", [])))
 
 
-def validate_tlr(payload: Any, sources: list[dict] | None = None) -> dict:
+def validate_tlr(payload: Any, sources: list[dict] | None = None, *, require_abstractions: bool = False) -> dict:
     """Validate and canonicalize the static executable profile without repairs.
 
     Numeric values and bounds become exact canonical-unit magnitudes. Source
@@ -49,10 +49,14 @@ def validate_tlr(payload: Any, sources: list[dict] | None = None) -> dict:
     The shared validator currently supports at most 24 variables, 40 assumptions,
     depth 16 and 1600 expression nodes per validation call.
     """
-    _keys(payload, {"schema", "variables", "assumptions", "requirements"},
+    _keys(payload, {"schema", "variables", "assumptions", "requirements", "abstraction_policy"},
           {"schema", "variables", "requirements"}, "TLR")
     if payload["schema"] != SCHEMA:
         raise ValueError(f"TLR schema must be {SCHEMA}.")
+    if require_abstractions or "abstraction_policy" in payload:
+        if payload.get("abstraction_policy") != POLICY_VERSION:
+            raise ValueError(f"New formalizations must declare abstraction_policy {POLICY_VERSION}")
+        require_abstractions = True
     raw_variables = payload["variables"]
     raw_assumptions = payload.get("assumptions", [])
     rows = payload["requirements"]
@@ -90,7 +94,7 @@ def validate_tlr(payload: Any, sources: list[dict] | None = None) -> dict:
             source_by_id[rid] = row
     normalized, ids = [], set()
     for row in rows:
-        _keys(row, {"id", "status", "formula", "reason", "text", "source"}, {"id", "status"}, "Requirement")
+        _keys(row, {"id", "status", "formula", "reason", "reason_code", "abstraction", "text", "source"}, {"id", "status"}, "Requirement")
         rid = _text(row["id"], "Requirement ID", 200)
         if rid in ids:
             raise ValueError(f"Duplicate TLR requirement ID: {rid}.")
@@ -145,8 +149,20 @@ def validate_tlr(payload: Any, sources: list[dict] | None = None) -> dict:
     for variable in context["variables"]:
         if variable["name"] in descriptions:
             variable["description"] = descriptions[variable["name"]]
-    return {"schema": SCHEMA, "variables": context["variables"],
-            "assumptions": context["background"], "requirements": normalized}
+    raw_by_id = {row["id"]: row for row in rows}
+    for row in normalized:
+        raw = raw_by_id[row["id"]]
+        metadata = validate_abstraction({**row, **{k: raw[k] for k in ("abstraction", "reason_code") if k in raw}},
+                                        context["variables"], required=require_abstractions)
+        if metadata is not None:
+            row["abstraction"] = metadata
+        if "reason_code" in raw:
+            row["reason_code"] = raw["reason_code"]
+    result = {"schema": SCHEMA, "variables": context["variables"],
+              "assumptions": context["background"], "requirements": normalized}
+    if require_abstractions:
+        result["abstraction_policy"] = POLICY_VERSION
+    return result
 
 
 def tlr_context(tlr: dict) -> dict:
@@ -209,8 +225,9 @@ def render_sysml(tlr: dict, name: str = "RequirementsModel") -> str:
     normalized = validate_tlr(tlr)
     package = _identifier(str(name))
     lines = [f"package {package} {{", "    private import ScalarValues::*;",
-             "    doc /* Current-state requirement constraints.",
+             "    doc /* Typed requirement abstractions; implementation behavior is not verified.",
              "       Numeric values are canonical scalar magnitudes; physical units are documented metadata.",
+             "       Policy: " + normalized.get("abstraction_policy", "legacy/unclassified") + ".",
              "       Source wording and any unsupported meaning appear on each requirement. */",
              "    part def RequirementState {"]
     for variable in normalized["variables"]:
@@ -240,6 +257,15 @@ def render_sysml(tlr: dict, name: str = "RequirementsModel") -> str:
             lines.append("           Source: " + _doc(json.dumps(row["source"], ensure_ascii=False, sort_keys=True)))
         if row.get("reason"):
             lines.append("           Limitation: " + _doc(row["reason"]))
+        if row.get("reason_code"):
+            lines.append("           Reason category: " + row["reason_code"])
+        if row.get("abstraction"):
+            abstraction = row["abstraction"]
+            for key in ("kind", "subject", "operation", "symbol", "meaning", "scope"):
+                if key in abstraction:
+                    lines.append(f"           Abstraction {key}: {_doc(abstraction[key])}")
+            for limit in abstraction["limitations"]:
+                lines.append("           Abstraction limitation: " + _doc(limit))
         lines.append("        */")
         if row["status"] == "supported":
             lines += ["        subject observedSystem : RequirementState = modeledState;",

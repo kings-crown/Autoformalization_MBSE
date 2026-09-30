@@ -1,0 +1,89 @@
+[
+  {
+    "id": "MSG-SEND",
+    "text": "The messaging service shall provide an operation that sends a unicast message to a specified destination address.",
+    "source": {
+      "document": "Constructed messaging abstraction regression fixture",
+      "section": "MSG-SEND",
+      "origin": "authored_project_fixture",
+      "context": {
+        "definitions_and_context": [
+          {
+            "id": "MSG-DEF-UNICAST",
+            "role": "definition",
+            "text": "A unicast message specifies one destination address. Receipt and destination address observations refer to that same selected message."
+          },
+          {
+            "id": "MSG-DEF-ADDRESS",
+            "role": "definition",
+            "text": "An address denotes an opaque endpoint identity. Only equality between addresses is modeled; address arithmetic and a finite address range are not required."
+          },
+          {
+            "id": "MSG-DEF-TTL",
+            "role": "definition",
+            "text": "The multicast time-to-live (TTL) parameter is a hop count. This fixture requires a configuration operation without specifying a value, range, elapsed-time limit, or router implementation."
+          }
+        ],
+        "example_scope": "Authored examples for testing capability availability, a guarded recipient relation, and hop-count configuration. The examples are not extracted from a study corpus and do not assert successful delivery, eventual receipt, or a deployed implementation."
+      }
+    }
+  },
+  {
+    "id": "MSG-RECIPIENT",
+    "text": "If a selected unicast message is received, its receiving address shall equal that message's specified destination address.",
+    "source": {
+      "document": "Constructed messaging abstraction regression fixture",
+      "section": "MSG-RECIPIENT",
+      "origin": "authored_project_fixture",
+      "context": {
+        "definitions_and_context": [
+          {
+            "id": "MSG-DEF-UNICAST",
+            "role": "definition",
+            "text": "A unicast message specifies one destination address. Receipt and destination address observations refer to that same selected message."
+          },
+          {
+            "id": "MSG-DEF-ADDRESS",
+            "role": "definition",
+            "text": "An address denotes an opaque endpoint identity. Only equality between addresses is modeled; address arithmetic and a finite address range are not required."
+          },
+          {
+            "id": "MSG-DEF-TTL",
+            "role": "definition",
+            "text": "The multicast time-to-live (TTL) parameter is a hop count. This fixture requires a configuration operation without specifying a value, range, elapsed-time limit, or router implementation."
+          }
+        ],
+        "example_scope": "Authored examples for testing capability availability, a guarded recipient relation, and hop-count configuration. The examples are not extracted from a study corpus and do not assert successful delivery, eventual receipt, or a deployed implementation."
+      }
+    }
+  },
+  {
+    "id": "MSG-TTL",
+    "text": "The messaging service shall provide an operation for configuring the time-to-live (TTL) hop-count parameter of a multicast message.",
+    "source": {
+      "document": "Constructed messaging abstraction regression fixture",
+      "section": "MSG-TTL",
+      "origin": "authored_project_fixture",
+      "context": {
+        "definitions_and_context": [
+          {
+            "id": "MSG-DEF-UNICAST",
+            "role": "definition",
+            "text": "A unicast message specifies one destination address. Receipt and destination address observations refer to that same selected message."
+          },
+          {
+            "id": "MSG-DEF-ADDRESS",
+            "role": "definition",
+            "text": "An address denotes an opaque endpoint identity. Only equality between addresses is modeled; address arithmetic and a finite address range are not required."
+          },
+          {
+            "id": "MSG-DEF-TTL",
+            "role": "definition",
+            "text": "The multicast time-to-live (TTL) parameter is a hop count. This fixture requires a configuration operation without specifying a value, range, elapsed-time limit, or router implementation."
+          }
+        ],
+        "example_scope": "Authored examples for testing capability availability, a guarded recipient relation, and hop-count configuration. The examples are not extracted from a study corpus and do not assert successful delivery, eventual receipt, or a deployed implementation."
+      }
+    }
+  }
+]

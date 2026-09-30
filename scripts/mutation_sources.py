@@ -263,7 +263,8 @@ def extract_scalar_formulas(manifest, packet, run):
     return formulas, unsupported
 
 
-def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout, model=None):
+def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout, model=None,
+                     abstention_repairs=0, feedback_repairs=0):
     directory = output / "generations" / str(repetition) / vid
     directory.mkdir(parents=True)
     write_json(directory / "requirements.json", packet)
@@ -273,7 +274,10 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
         command = [sys.executable, str(ROOT / "scripts" / "canonical_cli.py"), "run",
                    "--statement", str((directory / "requirements.json").resolve()),
                    "--context-file", str((directory / "context.json").resolve()),
-                   "--condition", "C", "--output-dir", str(run_directory)]
+                   "--condition", "C", "--output-dir", str(run_directory),
+                   "--abstention-repairs", str(abstention_repairs)]
+        if feedback_repairs:
+            command.extend(["--feedback-repairs", str(feedback_repairs)])
         if model:
             command.extend(["--model", model])
     else:
@@ -321,12 +325,26 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
                 run["sources"] = read_json(sources_path)
     except (ValueError, OSError):
         pass
+    if engine == "pipeline":
+        # Retain the actual recovery ledger even when stdout was truncated or
+        # the child reported an error after writing its execution artifacts.
+        for field, filename in (("configuration", "configuration.json"), ("repair", "repair.json"),
+                                ("feedback_repair", "feedback_repair.json")):
+            evidence_path = run_directory / filename
+            if not isinstance(run.get(field), dict) and evidence_path.is_file():
+                try:
+                    evidence = read_json(evidence_path)
+                    if isinstance(evidence, dict):
+                        run[field] = evidence
+                except (ValueError, OSError):
+                    pass
     if status == "completed" and not isinstance(run.get("tlr"), dict):
         status = "parse_error"
     formulas, unsupported = extract_formulas(manifest, packet, run)
     elapsed = time.monotonic() - started
     invocation = {"command": command, "engine": engine, "status": status, "returncode": returncode,
-                  "latency_seconds": elapsed, "generation_timeout_seconds": timeout}
+                  "latency_seconds": elapsed, "generation_timeout_seconds": timeout,
+                  "abstention_repairs": abstention_repairs, "feedback_repairs": feedback_repairs}
     write_json(directory / "invocation.json", invocation)
     return {"variant_id": vid, "repetition": repetition, "source_requirements": packet,
             "formulas": formulas, "unsupported": unsupported, "status": status,
@@ -337,11 +355,23 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
             "runtime_evidence": {"run_id": run.get("id"), "status": run.get("status"),
                 "analysis": run.get("analysis"), "compilation": run.get("compilation"),
                 "model": run.get("model"), "stages": run.get("stages"),
+                "configuration": deepcopy(run.get("configuration")),
+                "repair": deepcopy(run.get("repair")),
+                "feedback_repair": deepcopy(run.get("feedback_repair")),
                 "scope": "Recorded runtime evidence; mutation comparator findings are separate."}}
 
 
 def run_source(manifest, output, engine="pipeline", repetitions=1, max_generations=20,
-               generation_timeout_seconds=600, timeout_seconds=10.0, solver="z3", model=None):
+               generation_timeout_seconds=600, timeout_seconds=10.0, solver="z3", model=None,
+               abstention_repairs=0, feedback_repairs=0):
+    if type(abstention_repairs) is not int or not 0 <= abstention_repairs <= 5:
+        raise ValueError("Abstention repairs must be an integer from 0 to 5")
+    if type(feedback_repairs) is not int or not 0 <= feedback_repairs <= 5:
+        raise ValueError("Feedback repairs must be an integer from 0 to 5")
+    if abstention_repairs and feedback_repairs:
+        raise ValueError("Choose abstention recovery or feedback repairs, not both")
+    if engine == "local" and (abstention_repairs or feedback_repairs):
+        raise ValueError("The local fixture engine cannot use LLM abstention or feedback repairs")
     manifest = validate_manifest(manifest)
     if engine not in {"local", "pipeline"} or type(repetitions) is not int or not 1 <= repetitions <= 50:
         raise ValueError("Choose local/pipeline and 1 to 50 repetitions")
@@ -356,16 +386,28 @@ def run_source(manifest, output, engine="pipeline", repetitions=1, max_generatio
     output, metadata = _new_output(output, manifest, "source", {"solver": solver, "timeout_seconds": timeout_seconds,
         "engine": engine, "repetitions": repetitions, "planned_workflow_invocations": planned,
         "max_generations": max_generations, "generation_timeout_seconds": generation_timeout_seconds,
-        "model": model,
-        "provider_policy": ("Canonical CLI condition C with fixed vocabulary/background and no semantic repair."
-                            if engine == "pipeline" else "Legacy fixture workflow; no provider calls.")})
+        "model": model, "abstention_repairs": abstention_repairs, "feedback_repairs": feedback_repairs,
+        "feedback_mode": "solver" if feedback_repairs else "none",
+        "max_additional_model_transport_invocations_per_workflow": 2 * abstention_repairs + feedback_repairs,
+        "max_model_transport_invocations_per_workflow": 1 + 2 * abstention_repairs + feedback_repairs if engine == "pipeline" else 0,
+        "max_model_transport_invocations": planned * (1 + 2 * abstention_repairs + feedback_repairs) if engine == "pipeline" else 0,
+        "generation_budget_scope": "max_generations bounds complete workflow invocations, not their internal model calls.",
+        "feedback_boundary": "Only each trial's source packet, fixed context, declared policy and its own internal C audit feedback enter generation/repair; held-out reference formulas, mutation labels and comparison results remain evaluation-only.",
+        "provider_policy": (
+            "Canonical CLI condition C with fixed vocabulary/background and the same explicit bounded solver-feedback repair budget for baseline, mutants and controls; no held-out comparison findings enter repair."
+            if feedback_repairs else
+            "Canonical CLI condition C with fixed vocabulary/background and the same explicit bounded abstention-recovery budget for baseline, mutants and controls."
+            if engine == "pipeline" else "Legacy fixture workflow; no provider calls.")})
     candidates = {"schema": "mutation_candidates/1", "context": manifest["context"], "samples": []}
     for repetition in range(1, repetitions + 1):
         for variant in [None] + source_variants:
             vid = variant["id"] if variant else "baseline"
             print(f"Mutation source generation {len(candidates['samples']) + 1}/{planned}: repetition {repetition}, {vid}", file=sys.stderr)
+            # Preserve zero-budget callback compatibility for existing fixture adapters.
+            feedback_options = {"feedback_repairs": feedback_repairs} if feedback_repairs else {}
             candidates["samples"].append(_generate_sample(manifest, source_packet(manifest, variant), vid, repetition,
-                                                        output, engine, generation_timeout_seconds, model=model))
+                                                        output, engine, generation_timeout_seconds, model=model,
+                                                        abstention_repairs=abstention_repairs, **feedback_options))
             write_json(output / "candidates.json", candidates)
             write_json(output / "progress.json", {"completed_workflow_invocations": len(candidates["samples"]), "planned": planned})
     return _evaluate_samples(manifest, candidates, output, metadata, timeout_seconds, solver)

@@ -1,0 +1,126 @@
+{
+  "schema": "mbse_tlr/1",
+  "variables": [
+    {
+      "name": "battery_voltage",
+      "type": "Real",
+      "unit": "V",
+      "bounds": {
+        "lower": "0"
+      },
+      "description": "Battery terminal voltage, expressed in volts."
+    },
+    {
+      "name": "maintenance_mode",
+      "type": "Bool",
+      "description": "Whether maintenance mode is active."
+    },
+    {
+      "name": "motion_enabled",
+      "type": "Bool",
+      "description": "Whether motion is enabled."
+    },
+    {
+      "name": "charging_enabled",
+      "type": "Bool",
+      "description": "Whether charging is enabled."
+    },
+    {
+      "name": "charging_current",
+      "type": "Real",
+      "unit": "A",
+      "bounds": {
+        "lower": "0"
+      },
+      "description": "Charging current magnitude, expressed in amperes."
+    }
+  ],
+  "assumptions": [],
+  "requirements": [
+    {
+      "id": "BAT-001",
+      "status": "supported",
+      "formula": {
+        "op": "<=",
+        "args": [
+          {
+            "var": "battery_voltage"
+          },
+          {
+            "value": "28",
+            "unit": "V"
+          }
+        ]
+      },
+      "abstraction": {
+        "kind": "state_constraint",
+        "meaning": "The battery terminal voltage is at most 28 V.",
+        "scope": "One observation of the modeled system.",
+        "limitations": [
+          "No transition relation or implementation realization is established."
+        ]
+      }
+    },
+    {
+      "id": "CTRL-002",
+      "status": "supported",
+      "formula": {
+        "op": "implies",
+        "args": [
+          {
+            "var": "maintenance_mode"
+          },
+          {
+            "op": "not",
+            "args": [
+              {
+                "var": "motion_enabled"
+              }
+            ]
+          }
+        ]
+      },
+      "abstraction": {
+        "kind": "state_constraint",
+        "meaning": "Maintenance mode excludes motion enablement in the observed state.",
+        "scope": "One observation of the modeled system.",
+        "limitations": [
+          "No transition relation or implementation realization is established."
+        ]
+      }
+    },
+    {
+      "id": "BAT-003",
+      "status": "supported",
+      "formula": {
+        "op": "implies",
+        "args": [
+          {
+            "var": "charging_enabled"
+          },
+          {
+            "op": ">=",
+            "args": [
+              {
+                "var": "charging_current"
+              },
+              {
+                "value": "0.5",
+                "unit": "A"
+              }
+            ]
+          }
+        ]
+      },
+      "abstraction": {
+        "kind": "state_constraint",
+        "meaning": "When charging is enabled its current is at least 0.5 A.",
+        "scope": "One observation of the modeled system.",
+        "limitations": [
+          "No transition relation or implementation realization is established."
+        ]
+      }
+    }
+  ],
+  "abstraction_policy": "mbse_abstraction/1"
+}

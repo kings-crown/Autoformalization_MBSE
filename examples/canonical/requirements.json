@@ -1,0 +1,26 @@
+[
+  {
+    "id": "BAT-001",
+    "text": "The battery voltage shall be at most 28 V.",
+    "source": {
+      "document": "Synthetic battery controller example",
+      "location": "clause 1"
+    }
+  },
+  {
+    "id": "CTRL-002",
+    "text": "When maintenance mode is active, motion shall be disabled.",
+    "source": {
+      "document": "Synthetic battery controller example",
+      "location": "clause 2"
+    }
+  },
+  {
+    "id": "BAT-003",
+    "text": "When charging is enabled, the charging current shall be at least 0.5 A.",
+    "source": {
+      "document": "Synthetic battery controller example",
+      "location": "clause 3"
+    }
+  }
+]

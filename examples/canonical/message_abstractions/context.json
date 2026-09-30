@@ -1,0 +1,32 @@
+{
+  "variables": [
+    {
+      "name": "unicast_send_available",
+      "type": "Bool"
+    },
+    {
+      "name": "unicast_received",
+      "type": "Bool"
+    },
+    {
+      "name": "receiving_address",
+      "type": "Int"
+    },
+    {
+      "name": "specified_address",
+      "type": "Int"
+    },
+    {
+      "name": "ttl_configuration_available",
+      "type": "Bool"
+    }
+  ],
+  "background": [],
+  "symbol_meanings": {
+    "unicast_send_available": "The messaging service offers an operation for sending a unicast message to a specified address.",
+    "unicast_received": "The selected unicast message is received in the selected symbolic occurrence.",
+    "receiving_address": "Opaque identity of the receiving address for that same selected message; only equality has meaning.",
+    "specified_address": "Opaque identity of that selected message's specified destination address; only equality has meaning.",
+    "ttl_configuration_available": "The messaging service offers an operation for configuring multicast message TTL, defined as hop count."
+  }
+}

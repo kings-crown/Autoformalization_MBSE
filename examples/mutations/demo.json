@@ -1,0 +1,254 @@
+{
+  "schema": "mutation_campaign/1",
+  "id": "four-families-demo",
+  "reference": {
+    "status": "constructed_fixture",
+    "author": "Prototype example authors",
+    "description": "Synthetic requirements and explicitly specified reference formulas for exercising mutation tooling. Not observed engineering defects or independently validated system requirements."
+  },
+  "context": {
+    "variables": [
+      {
+        "name": "start_command",
+        "type": "Bool"
+      },
+      {
+        "name": "acknowledgement",
+        "type": "Bool"
+      },
+      {
+        "name": "operating_mode",
+        "type": "Bool"
+      },
+      {
+        "name": "motion_enabled",
+        "type": "Bool"
+      },
+      {
+        "name": "channel_index",
+        "type": "Int",
+        "bounds": {
+          "lower": "0",
+          "upper": "10"
+        }
+      },
+      {
+        "name": "voltage",
+        "type": "Real",
+        "unit": "V",
+        "bounds": {
+          "lower": "0"
+        }
+      }
+    ],
+    "background": []
+  },
+  "requirements": [
+    {
+      "id": "RESPONSE",
+      "text": "When a START command is present, an acknowledgement shall be present.",
+      "source": {
+        "document": "Synthetic mutation demonstration",
+        "location": "clause 1",
+        "provenance": "Constructed regression fixture."
+      },
+      "formula": {
+        "op": "implies",
+        "args": [
+          {
+            "var": "start_command"
+          },
+          {
+            "var": "acknowledgement"
+          }
+        ]
+      }
+    },
+    {
+      "id": "GUARD",
+      "text": "When operating mode is enabled, motion shall be enabled.",
+      "source": {
+        "document": "Synthetic mutation demonstration",
+        "location": "clause 2",
+        "provenance": "Constructed regression fixture."
+      },
+      "formula": {
+        "op": "implies",
+        "args": [
+          {
+            "var": "operating_mode"
+          },
+          {
+            "var": "motion_enabled"
+          }
+        ]
+      }
+    },
+    {
+      "id": "VALUE",
+      "text": "The selected channel index shall equal 2.",
+      "source": {
+        "document": "Synthetic mutation demonstration",
+        "location": "clause 3",
+        "provenance": "Constructed regression fixture."
+      },
+      "formula": {
+        "op": "=",
+        "args": [
+          {
+            "var": "channel_index"
+          },
+          {
+            "value": "2",
+            "unit": "1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "LIMIT",
+      "text": "The battery voltage shall be at most 28 V.",
+      "source": {
+        "document": "Synthetic mutation demonstration",
+        "location": "clause 4",
+        "provenance": "Constructed regression fixture."
+      },
+      "formula": {
+        "op": "<=",
+        "args": [
+          {
+            "var": "voltage"
+          },
+          {
+            "value": "28",
+            "unit": "V"
+          }
+        ]
+      }
+    }
+  ],
+  "variants": [
+    {
+      "id": "response-suppressed",
+      "requirement_id": "RESPONSE",
+      "kind": "mutant",
+      "category": "required_response_suppression",
+      "eligibility": "A Boolean implication states the required response.",
+      "rationale": "Remove the required response without asserting its opposite.",
+      "expected_relation": "weakened",
+      "mutation": {
+        "operator": "suppress_response"
+      },
+      "text": "A START command imposes no acknowledgement obligation."
+    },
+    {
+      "id": "guard-removed",
+      "requirement_id": "GUARD",
+      "kind": "mutant",
+      "category": "operating_guard_removal",
+      "eligibility": "The requirement has an explicit operating-mode antecedent.",
+      "rationale": "Deleting this applicability guard makes its consequence unconditional.",
+      "expected_relation": "strengthened",
+      "mutation": {
+        "operator": "remove_guard"
+      },
+      "text": "Motion shall be enabled."
+    },
+    {
+      "id": "value-replaced",
+      "requirement_id": "VALUE",
+      "kind": "mutant",
+      "category": "value_binding_mismatch",
+      "eligibility": "The equality uses an explicit integer value.",
+      "rationale": "Replace the required setting while retaining its variable and type.",
+      "expected_relation": "changed",
+      "mutation": {
+        "operator": "replace_value",
+        "path": [
+          "args",
+          1
+        ],
+        "value": "3"
+      },
+      "text": "The selected channel index shall equal 3."
+    },
+    {
+      "id": "limit-relaxed",
+      "requirement_id": "LIMIT",
+      "kind": "mutant",
+      "category": "limit_violation",
+      "eligibility": "The requirement uses an upper bound with an explicit voltage value.",
+      "rationale": "Raise the upper limit by one canonical volt.",
+      "expected_relation": "weakened",
+      "mutation": {
+        "operator": "shift_bound",
+        "value": "1"
+      },
+      "text": "The battery voltage shall be at most 29 V."
+    },
+    {
+      "id": "response-control",
+      "requirement_id": "RESPONSE",
+      "kind": "control",
+      "category": "equivalent_control",
+      "eligibility": "The same condition and required response can be paraphrased.",
+      "rationale": "Double negation preserves the complete formal expression.",
+      "expected_relation": "equivalent",
+      "mutation": {
+        "operator": "double_negation"
+      },
+      "text": "If a START command is present, acknowledgement shall be present."
+    },
+    {
+      "id": "guard-control",
+      "requirement_id": "GUARD",
+      "kind": "control",
+      "category": "equivalent_control",
+      "eligibility": "The same applicability relation can be restated.",
+      "rationale": "Preserve the implication and both Boolean bindings.",
+      "expected_relation": "equivalent",
+      "mutation": {
+        "operator": "double_negation"
+      },
+      "text": "Motion shall be enabled whenever operating mode is enabled."
+    },
+    {
+      "id": "value-control",
+      "requirement_id": "VALUE",
+      "kind": "control",
+      "category": "equivalent_control",
+      "eligibility": "The equality can be paraphrased without changing its value.",
+      "rationale": "Preserve the equality under double negation.",
+      "expected_relation": "equivalent",
+      "mutation": {
+        "operator": "double_negation"
+      },
+      "text": "The selected channel index shall be exactly 2."
+    },
+    {
+      "id": "limit-unit-control",
+      "requirement_id": "LIMIT",
+      "kind": "control",
+      "category": "equivalent_control",
+      "eligibility": "Millivolts and volts have an exact supported conversion.",
+      "rationale": "The literal changes units while preserving the 28 V upper bound.",
+      "expected_relation": "equivalent",
+      "mutation": {
+        "operator": "explicit",
+        "value": {
+          "op": "<=",
+          "args": [
+            {
+              "var": "voltage"
+            },
+            {
+              "value": "28000",
+              "unit": "mV"
+            }
+          ]
+        }
+      },
+      "text": "The battery voltage shall be at most 28000 mV."
+    }
+  ]
+}

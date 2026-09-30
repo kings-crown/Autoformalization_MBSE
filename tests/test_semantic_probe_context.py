@@ -1,5 +1,4 @@
 """Real SMT context must survive diagnostic query construction."""
-import json
 from pathlib import Path
 import shutil
 import sys
@@ -31,6 +30,18 @@ class ContextTests(unittest.TestCase):
         result = pipeline._check_vacuity('(push 1)', {'R1': '(=> trigger true)'})
         self.assertFalse(result['passed'])
         self.assertEqual(result['solver_errors'][0]['status'], 'context_error')
+
+    def test_named_extraction_cannot_consume_background_or_comment_assertions(self):
+        source = '''(declare-const p Bool)
+(assert (! p :named background))
+(assert (! (=> trigger response) :named req_R1))
+(assert (! (not p) :named another_background))
+; (assert (! false :named req_COMMENT_ONLY))
+(assert (! (> x 3) :named |req_R2|))
+(assert (! p :named req_R3))'''
+        self.assertEqual(pipeline._extract_named_assertions(source), {
+            'R1': '(=> trigger response)', 'R2': '(> x 3)', 'R3': 'p',
+        })
 
     def test_only_direct_positive_enable_assertions_are_removed(self):
         source = '''(declare-const en_R1 Bool)
@@ -178,18 +189,95 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(result['passed'])
         self.assertEqual(result['checked_implication_count'], 0)
 
-    def test_saved_v3_context_is_preserved_without_editing_artifacts(self):
-        path = Path(__file__).resolve().parents[1] / 'out/review_workbench/run-cb72bca19a894957/pipeline_model_translate.json'
-        if not path.exists():
-            self.skipTest('Saved diagnostic fixture is unavailable')
-        source = json.loads(path.read_text())['smt_fragment']
+    def test_nine_guard_context_preserves_helpers_background_and_pair_selection(self):
+        # This maintained synthetic case reproduces the saved-run regression:
+        # declarations/definitions continue after assertions, helper bodies
+        # carry the obligations, and direct enables select the complete bundle.
+        # R1/R2/R3 conflict only together; every individual pair is feasible.
+        source = '''(set-option :produce-models true)
+(set-logic QF_LIA)
+(declare-const x Int)
+(assert (>= x 0))
+(define-fun requirement_1 () Bool
+  (>= x 2))
+(declare-const en_R1 Bool)
+(assert (! (=> en_R1 requirement_1) :named req_R1))
+(assert en_R1)
+; Interleaved declarations and named background must survive extraction.
+(declare-const y Int)
+(assert (! (= y (+ x 10)) :named background_link))
+(assert (<= x 4))
+(declare-const p Bool)
+(declare-const q Bool)
+(declare-const unavailable_trigger Bool)
+(assert (not unavailable_trigger))
+(define-fun requirement_2 () Bool (<= x 2))
+(define-fun requirement_3 () Bool (not (= x 2)))
+(define-fun requirement_4 () Bool p)
+(define-fun requirement_5 () Bool q)
+(define-fun requirement_6 () Bool (=> p q))
+(define-fun requirement_7 () Bool (>= y 11))
+(define-fun requirement_8 () Bool (<= y 13))
+; The hidden trigger really is unreachable, but the administrative-guard
+; vacuity checker must report that it has not analyzed this helper body.
+(define-fun requirement_9 () Bool
+  (=> unavailable_trigger (= x 99)))
+'''
+        for number in range(2, 10):
+            source += (f'(declare-const en_R{number} Bool)\n'
+                       f'(assert (! (=> en_R{number} requirement_{number}) :named req_R{number}))\n'
+                       f'(assert en_R{number})\n')
+        source += '(check-sat)\n; trailing observation comment\n(get-model)\n(exit)\n'
         named = pipeline._extract_named_assertions(source)
+        expected_ids = {f'R{number}' for number in range(1, 10)}
+        enablers = {f'en_{rid}' for rid in expected_ids}
+        self.assertEqual(set(named), expected_ids)
+
+        context, scope = pipeline._semantic_probe_context(source, enablers, drop_requirements=True)
+        self.assertEqual(set(scope['removed_direct_enable_assertions']), enablers)
+        self.assertEqual(set(scope['removed_requirement_assertions']), {f'req_{rid}' for rid in expected_ids})
+        self.assertIn('(define-fun requirement_1 () Bool\n  (>= x 2))', context)
+        self.assertIn('(declare-const y Int)', context)
+        self.assertIn('(assert (! (= y (+ x 10)) :named background_link))', context)
+        self.assertIn('(define-fun requirement_9 () Bool\n  (=> unavailable_trigger (= x 99)))', context)
+        self.assertNotIn('(get-model)', context)
+        self.assertNotIn('(exit)', context)
+
+        # Retained premises constrain the values, while removed requirements
+        # do not contaminate background-only probes.
+        probes = [
+            ('(assert (= x 0))', 'sat'),
+            ('(assert (= x 5))', 'unsat'),
+            ('(assert (not (= y (+ x 10))))', 'unsat'),
+            ('(assert unavailable_trigger)', 'unsat'),
+        ]
+        for assertion, expected in probes:
+            with self.subTest(assertion=assertion):
+                verdict = pipeline._solver_verdict(pipeline.run_z3_fragment(context + '\n' + assertion + '\n(check-sat)'))
+                self.assertEqual(verdict, expected)
+
         result = pipeline._check_vacuity(source, named)
+        self.assertTrue(result['passed'], result)
         self.assertEqual(result['solver_errors'], [])
-        self.assertEqual(len(result['skipped_administrative_guards']), 9)
+        self.assertEqual({item['requirement_id'] for item in result['skipped_administrative_guards']}, expected_ids)
         self.assertEqual(result['checked_implication_count'], 0)
-        pairs = pipeline._check_pairwise_conflicts(source, list(named))
+        self.assertFalse(result['scope']['underlying_conditional_triggers_checked'])
+        self.assertTrue(all('not evidence' in item['reason'] for item in result['skipped_administrative_guards']))
+
+        # The complete bundle is inconsistent, so passing all pair probes
+        # proves that they select pairs instead of retaining all nine enables.
+        full_query = source.split('(check-sat)', 1)[0] + '(check-sat)'
+        self.assertEqual(pipeline._solver_verdict(pipeline.run_z3_fragment(full_query)), 'unsat')
+        with patch.object(pipeline, 'MBSE_MAX_PAIRWISE_CHECKS', 36), \
+                patch.object(pipeline, 'run_z3_fragment', wraps=pipeline.run_z3_fragment) as solve:
+            pairs = pipeline._check_pairwise_conflicts(source, sorted(named))
+        self.assertEqual(solve.call_count, 36)
         self.assertTrue(pairs['passed'], pairs)
+        self.assertEqual(pairs['conflicts'], [])
+        self.assertEqual(pairs['solver_errors'], [])
+        self.assertEqual(set(pairs['scope']['removed_direct_enable_assertions']), enablers)
+        self.assertEqual(pairs['scope']['removed_requirement_assertions'], [])
+
 
 
 if __name__ == '__main__':

@@ -126,19 +126,26 @@ class CLIRequestTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn('requirements_pipeline.py legacy --help', error)
 
-    def test_default_and_run_dispatch_use_review_cli_only(self):
-        for argv, expected in [(['--statement', 'input.csv'], ['--statement', 'input.csv']),
-                               (['run', '--statement', 'input.csv'], ['--statement', 'input.csv'])]:
-            with patch('review_cli.main', return_value=7) as call, patch.object(solver, 'legacy_main') as legacy:
+    def test_default_dispatch_is_canonical_and_review_is_explicit(self):
+        for argv in (['--statement', 'input.csv'], ['run', '--statement', 'input.csv']):
+            with patch('canonical_cli.main', return_value=7) as canonical, patch('review_cli.main') as review, patch.object(solver, 'legacy_main') as legacy:
                 with self.assertRaises(SystemExit) as result:
                     solver.main(argv)
                 self.assertEqual(result.exception.code, 7)
-                call.assert_called_once_with(expected)
+                canonical.assert_called_once_with(argv)
+                review.assert_not_called()
                 legacy.assert_not_called()
-        with patch('review_cli.main') as shared, patch.object(solver, 'legacy_main') as legacy:
+        with patch('review_cli.main', return_value=8) as review, patch('canonical_cli.main') as canonical:
+            with self.assertRaises(SystemExit) as result:
+                solver.main(['review', '--statement', 'input.csv'])
+            self.assertEqual(result.exception.code, 8)
+            review.assert_called_once_with(['--statement', 'input.csv'])
+            canonical.assert_not_called()
+        with patch('review_cli.main') as review, patch('canonical_cli.main') as canonical, patch.object(solver, 'legacy_main') as legacy:
             solver.main(['legacy', '--help'])
             legacy.assert_called_once_with(['--help'])
-            shared.assert_not_called()
+            review.assert_not_called()
+            canonical.assert_not_called()
 
 
 @unittest.skipUnless(shutil.which('z3'), 'Real local Z3 executable unavailable')
