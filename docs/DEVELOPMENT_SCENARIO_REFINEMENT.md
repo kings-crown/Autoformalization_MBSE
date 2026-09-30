@@ -21,7 +21,7 @@ Contextual source packet                  Development scenario suite
        v                                            |
   Shared initial TLR                                |
        |                                            |
-       +--> C: source + ordinary Z3 audits            |
+       +--> C: source + ordinary Z3 audits          |
        |         |                                  |
        |         +--> bounded proposals --> C final |
        |                                            |
