@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -19,6 +20,20 @@ from typing import Any
 from review_behavior import validate_behavior, _emit, _number
 
 SCHEMA = "mutation_comparison/1"
+
+
+def _static_capacity():
+    raw = os.environ.get("MBSE_STATIC_MAX_VARIABLES", "24")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("MBSE_STATIC_MAX_VARIABLES must be an integer from 1 to 128") from exc
+    if not 1 <= value <= 128:
+        raise ValueError("MBSE_STATIC_MAX_VARIABLES must be an integer from 1 to 128")
+    return value
+
+
+STATIC_MAX_VARIABLES = _static_capacity()
 
 
 def _keys(value: Any, allowed: set[str], required: set[str], label: str) -> None:
@@ -39,21 +54,25 @@ def _wrapper(variables: list[dict], background: list[dict], formula: Any = True)
 
 
 def validate_context(variables: Any, background: Any) -> dict:
-    """Normalize 1–24 typed symbols and up to 40 explicit static assumptions.
+    """Normalize bounded typed symbols and up to 40 explicit static assumptions.
+
+    The process-level MBSE_STATIC_MAX_VARIABLES setting defaults to 24 and must
+    be frozen with a study (maximum 128). It changes capacity, not AST semantics
+    or the default capacity of the separate transition-model validator.
 
     Variable fields: name, type, optional numeric unit/bounds. Background fields:
     id, explanatory text, predicate. Unknown fields, parameter values, roles and
     next-state references are rejected. Numeric quantities use exact decimals.
     """
-    if not isinstance(variables, list) or not 1 <= len(variables) <= 24:
-        raise ValueError("Provide 1 to 24 typed variables.")
+    if not isinstance(variables, list) or not 1 <= len(variables) <= STATIC_MAX_VARIABLES:
+        raise ValueError(f"Provide 1 to {STATIC_MAX_VARIABLES} typed variables.")
     if not isinstance(background, list) or len(background) > 40:
         raise ValueError("Provide at most 40 explicit background assumptions.")
     for variable in variables:
         _keys(variable, {"name", "type", "unit", "bounds"}, {"name", "type"}, "Variable")
     for assumption in background:
         _keys(assumption, {"id", "text", "predicate"}, {"id", "text", "predicate"}, "Background")
-    normalized = validate_behavior(_wrapper(variables, background), ["Target"])
+    normalized = validate_behavior(_wrapper(variables, background), ["Target"], max_variables=STATIC_MAX_VARIABLES)
     return {"variables": [{k: v for k, v in row.items() if k != "role"}
                           for row in normalized["variables"]],
             "background": [{k: v for k, v in row.items() if k != "scope"}
@@ -68,7 +87,7 @@ def _context(context: Any) -> dict:
 def validate_formula(formula: Any, context: dict) -> Any:
     """Validate a Boolean formula; reject unsupported operators and dimensions."""
     context = _context(context)
-    normalized = validate_behavior(_wrapper(context["variables"], context["background"], formula), ["Target"])
+    normalized = validate_behavior(_wrapper(context["variables"], context["background"], formula), ["Target"], max_variables=STATIC_MAX_VARIABLES)
     return normalized["properties"][0]["predicate"]
 
 

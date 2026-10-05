@@ -91,8 +91,9 @@ def _integer(value: Any, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def validate_behavior(payload: dict, requirement_ids: list[str]) -> dict:
+def validate_behavior(payload: dict, requirement_ids: list[str], *, max_variables: int = MAX_VARIABLES) -> dict:
     """Validate and normalize the constrained JSON AST; never execute input code."""
+    _integer(max_variables, "Variable capacity", 1, 128)
     _keys(payload, {"schema", "horizon", "step", "variables", "initial", "transitions", "assumptions", "properties"},
           {"schema", "horizon", "step", "variables", "initial", "transitions", "properties"}, "Behavior")
     if payload["schema"] != SCHEMA:
@@ -104,8 +105,8 @@ def validate_behavior(payload: dict, requirement_ids: list[str]) -> dict:
     if step_unit != "s" or Decimal(step_value) <= 0:
         raise ValueError("step must be a positive duration in a supported time unit.")
     raw_variables = payload["variables"]
-    if not isinstance(raw_variables, list) or not 1 <= len(raw_variables) <= MAX_VARIABLES:
-        raise ValueError(f"Provide 1 to {MAX_VARIABLES} typed variables.")
+    if not isinstance(raw_variables, list) or not 1 <= len(raw_variables) <= max_variables:
+        raise ValueError(f"Provide 1 to {max_variables} typed variables.")
     variables, table = [], {}
     for raw in raw_variables:
         _keys(raw, {"name", "type", "role", "unit", "bounds", "value"}, {"name", "type", "role"}, "Variable")
