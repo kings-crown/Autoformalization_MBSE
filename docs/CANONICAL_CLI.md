@@ -173,6 +173,7 @@ Under this abstention policy, B/C share the selected recovered TLR and SysML. B 
 Shared initial TLR -> B: source review ----> B final TLR -> shared renderer
                   \-> C: source + Z3 -----> C final TLR -> shared renderer
                           ^        |
+                          |        |
                           +--------+  up to the same K proposal calls per branch
 ```
 
