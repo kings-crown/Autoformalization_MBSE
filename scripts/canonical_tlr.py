@@ -46,8 +46,9 @@ def validate_tlr(payload: Any, sources: list[dict] | None = None, *, require_abs
     packets, when supplied, must have exactly the same unique requirement IDs;
     source wording is preserved and a different generated wording is rejected.
     Unsupported and unresolved obligations remain documentation-only records.
-    The shared validator currently supports at most 24 variables, 40 assumptions,
-    depth 16 and 1600 expression nodes per validation call.
+    Variable capacity defaults to 24 and is configured before process startup
+    with MBSE_STATIC_MAX_VARIABLES (maximum 128). Other limits remain 40
+    assumptions, depth 16 and 1600 expression nodes per validation call.
     """
     _keys(payload, {"schema", "variables", "assumptions", "requirements", "abstraction_policy"},
           {"schema", "variables", "requirements"}, "TLR")
@@ -94,7 +95,7 @@ def validate_tlr(payload: Any, sources: list[dict] | None = None, *, require_abs
             source_by_id[rid] = row
     normalized, ids = [], set()
     for row in rows:
-        _keys(row, {"id", "status", "formula", "reason", "reason_code", "abstraction", "text", "source"}, {"id", "status"}, "Requirement")
+        _keys(row, {"id", "status", "formula", "reason", "reason_code", "abstraction", "text", "source", "coverage"}, {"id", "status"}, "Requirement")
         rid = _text(row["id"], "Requirement ID", 200)
         if rid in ids:
             raise ValueError(f"Duplicate TLR requirement ID: {rid}.")
@@ -130,6 +131,9 @@ def validate_tlr(payload: Any, sources: list[dict] | None = None, *, require_abs
             out["text"] = _text(row["text"], f"Requirement {rid} text")
         if "source" in row:
             out["source"] = deepcopy(row["source"])
+        if "coverage" in row:
+            from canonical_coverage import normalize_coverage
+            out["coverage"] = normalize_coverage(row["coverage"])
         if sources is not None and rid in source_by_id:
             source = source_by_id[rid]
             if "text" in row and row["text"] != source["text"]:
@@ -214,7 +218,7 @@ def _expr(ast: Any, subject: str = "") -> str:
     return "(" + (" " + op + " ").join(args) + ")"
 
 
-def render_sysml(tlr: dict, name: str = "RequirementsModel") -> str:
+def render_sysml(tlr: dict, name: str = "RequirementsModel", *, eligible_ids=None) -> str:
     """Render exactly the validated AST into one shared typed requirements model.
 
     Values are canonical scalar magnitudes with documented physical units. This
@@ -223,6 +227,10 @@ def render_sysml(tlr: dict, name: str = "RequirementsModel") -> str:
     No inferred architecture or requirement-satisfaction assertion is introduced.
     """
     normalized = validate_tlr(tlr)
+    supported_ids = {r["id"] for r in normalized["requirements"] if r["status"] == "supported"}
+    allowed = supported_ids if eligible_ids is None else set(eligible_ids)
+    if not allowed <= supported_ids:
+        raise ValueError("Eligible rule IDs must identify supported source records")
     package = _identifier(str(name))
     lines = [f"package {package} {{", "    private import ScalarValues::*;",
              "    doc /* Typed requirement abstractions; implementation behavior is not verified.",
@@ -266,8 +274,22 @@ def render_sysml(tlr: dict, name: str = "RequirementsModel") -> str:
                     lines.append(f"           Abstraction {key}: {_doc(abstraction[key])}")
             for limit in abstraction["limitations"]:
                 lines.append("           Abstraction limitation: " + _doc(limit))
+        for component in row.get("coverage", []):
+            lines.append("           Source obligation: " + _doc(component["obligation_id"])
+                         + "; candidate coverage disposition: " + _doc(component["status"]) + ".")
+            if component.get("formula_path"):
+                rule = (f"Req_{number}_{_identifier(row['id'])}::obligation"
+                        if row["status"] == "supported" and row["id"] in allowed else "withheld; no executable element")
+                lines.append("           Component formula: " + _doc(component["formula_path"])
+                             + "; rule element: " + _doc(rule) + ".")
+            if component.get("slots"):
+                lines.append("           Component bindings: " + _doc(json.dumps(component["slots"], sort_keys=True)))
+            if component.get("reason"):
+                lines.append("           Component limitation: " + _doc(component["reason"]))
+        if row["status"] == "supported" and row["id"] not in allowed:
+            lines.append("           Executable constraint withheld; the proposed formula is retained in candidate artifacts.")
         lines.append("        */")
-        if row["status"] == "supported":
+        if row["status"] == "supported" and row["id"] in allowed:
             lines += ["        subject observedSystem : RequirementState = modeledState;",
                       f"        require constraint obligation {{ {_expr(row['formula'], 'observedSystem.')} }}"]
         lines += ["    }", ""]

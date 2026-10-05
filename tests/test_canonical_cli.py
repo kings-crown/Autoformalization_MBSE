@@ -3,7 +3,8 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import shutil
-import subprocess
+import io
+from contextlib import redirect_stdout
 import sys
 import tempfile
 import unittest
@@ -32,6 +33,9 @@ def audited(*args, **kwargs):
     return {"status": "passed", "admitted": True, "background_status": "sat", "consistency_status": "sat"}
 
 
+from source_review_support import pass_source_review
+
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class CanonicalCliTests(unittest.TestCase):
     def test_B_does_not_call_solver_and_uses_one_generation(self):
         sources, tlr, context = fixtures()
@@ -144,7 +148,10 @@ class CanonicalCliTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed", result)
             self.assertEqual(result["admission"], "withheld")
             self.assertEqual(result["analysis"]["status"], "unsupported")
-            self.assertIn(sources[0]["text"], (directory / "model.sysml").read_text())
+            self.assertEqual(result["model_file"], "model.sysml")
+            self.assertTrue((directory / "model.sysml").exists())
+            self.assertNotIn("require constraint obligation", (directory / "model.sysml").read_text())
+            self.assertEqual(read_json(directory / "sources.json"), sources)
             self.assertFalse(list((directory / "audit").glob("*.smt2")))
 
     def test_supplied_fixtures_do_not_call_provider_and_skip_compile_prevents_admission(self):
@@ -189,13 +196,13 @@ class CanonicalCliTests(unittest.TestCase):
     def test_full_default_CLI_BC_uses_real_solver_and_compiler_without_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "execution"
-            completed = subprocess.run([
-                sys.executable, str(ROOT / "scripts" / "requirements_pipeline.py"), "run",
-                "--statement", str(EXAMPLE / "requirements.json"), "--tlr-file", str(EXAMPLE / "tlr.json"),
-                "--context-file", str(EXAMPLE / "context.json"), "--condition", "BC",
-                "--model", "offline-fixture", "--output-dir", str(output),
-            ], cwd=ROOT, text=True, capture_output=True, timeout=90, check=False)
-            self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout[-3000:])
+            from canonical_cli import main
+            with redirect_stdout(io.StringIO()), patch("canonical_cli._ask", side_effect=AssertionError("Use explicit test reviewer only")):
+                code = main(["run",
+                    "--statement", str(EXAMPLE / "requirements.json"), "--tlr-file", str(EXAMPLE / "tlr.json"),
+                    "--context-file", str(EXAMPLE / "context.json"), "--condition", "BC",
+                    "--model", "offline-fixture", "--output-dir", str(output)])
+            self.assertEqual(code, 0)
             result = read_json(output / "result.json")
             self.assertEqual(result["status"], "completed", result)
             self.assertEqual(result["compilation"]["status"], "passed", result["compilation"])

@@ -8,13 +8,14 @@ import sys
 
 def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=None, tlr=None,
                        a_sysml=None, compile_model=True, solver="z3", timeout_seconds=10.0,
-                       generator=None, feedback_repairs=2, development_scenarios=None):
+                       generator=None, feedback_repairs=2, development_scenarios=None, format_repairs=0):
     import canonical_cli as cli
     from canonical_feedback import FEEDBACK_POLICY_VERSION
 
     if type(repetitions) is not int or not 1 <= repetitions <= 50:
         raise ValueError("Repetitions must be from 1 to 50")
     cli._repair_budget(feedback_repairs, "Feedback repair budget")
+    cli._recovery_budget(format_repairs, "Initial format correction budget")
     if not feedback_repairs:
         raise ValueError("The feedback study requires a positive review budget")
     context, model = cli._fixed_context(context), cli._model(model)
@@ -26,20 +27,25 @@ def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=N
     cli.write_json(directory / "sources.json", sources)
     if development_scenarios is not None:
         cli.write_json(directory / "development_suite.json", development_scenarios)
-    config = {"schema": "canonical_feedback_study/1", "model": model, "repetitions": repetitions,
+    config = {"schema": "canonical_feedback_study/2", "workflow_policy": "direct_tlr_feedback/1",
+        "format_repair_budget": format_repairs, "source_review_required": False,
+        "source_review_mode": "embedded_in_feedback", "obligation_inventory_required": False,
+        "static_max_variables": cli.STATIC_MAX_VARIABLES, "model": model, "repetitions": repetitions,
         "context": context, "conditions": ["A", "B", "C"], "shared_BC_candidate": False,
         "shared_initial_TLR": True, "feedback_repair_budget": feedback_repairs,
         "abstention_repair_budget": 0, "repair_policy": FEEDBACK_POLICY_VERSION,
         "feedback_modes": {"A": "none", "B": "source", "C": "solver"},
         "planned_generation_calls": repetitions * ((a_sysml is None) + (tlr is None)),
         "max_additional_transport_invocations": 2 * repetitions * feedback_repairs,
-        "max_model_transport_invocations": repetitions * ((a_sysml is None) + (tlr is None) + 2 * feedback_repairs),
+        "max_model_transport_invocations": repetitions * ((a_sysml is None) + (tlr is None) * (1 + format_repairs) + 2 * feedback_repairs),
         "order": "Alternate A/structured generation and B/C review branch order across repetitions",
         "profile": cli.PROFILE, "abstraction_policy": cli.POLICY,
         "semantic_repairs": 0, "repair_attempts": 0,
         "semantic_repairs_scope": "Accepted candidate revisions; no source, evaluator or reference changes.",
         "budget_scope": "One source-grounded proposal call per round in each B/C branch; equal maximum opportunities, actual calls recorded.",
         "evaluation_boundary": "Only frozen final SysML and source/context enter judges; no judge or held-out mutation feedback enters review."}
+    config["max_generation_transport_invocations"] = config["max_model_transport_invocations"]
+    config["max_source_review_calls"] = 0
     if development_scenarios is not None:
         from canonical_feedback import SCENARIO_POLICY_VERSION
         config.update(C_repair_policy=SCENARIO_POLICY_VERSION, development_scenarios="development_suite.json",
@@ -48,7 +54,7 @@ def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=N
     cli.write_json(directory / "study_configuration.json", config)
     rows = []
     common = dict(model=model, context=context, compile_model=compile_model, solver=solver,
-                  timeout_seconds=timeout_seconds, generator=generator, abstention_repairs=0)
+                  timeout_seconds=timeout_seconds, generator=generator, format_repairs=format_repairs)
     for rep in range(1, repetitions + 1):
         row = {"repetition": rep}
         rep_dir = directory / f"rep-{rep:03d}"
@@ -81,11 +87,16 @@ def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=N
                     "errors": ["Shared initial generation failed; no independent replacement generated."],
                     "configuration": {"condition": arm, "model": model, "generation_mode": "shared_initial_TLR",
                         "initial_candidate": "../initial", "generation_attempts": 0, "semantic_repairs": 0,
+                        "format_repair_calls": 0, "model_transport_invocations": 0,
+                        "source_review_required": False, "source_review_mode": "embedded_in_feedback",
                         "repair_attempts": 0, "feedback_repair_budget": feedback_repairs,
                         "feedback_mode": "solver" if arm == "C" else "source",
                         "repair_policy": FEEDBACK_POLICY_VERSION, "repair_stop_reason": "initial_generation_failed",
                         "max_model_transport_invocations": feedback_repairs},
-                    "source_fidelity": "unassessed"}
+                    "source_fidelity": "not_assessed"}
+                from canonical_assurance import conversion_assurance
+                branch["assurance"] = conversion_assurance(branch, sources)
+                cli.write_json(path / "assurance.json", branch["assurance"])
                 cli.write_json(path / "configuration.json", branch["configuration"])
                 cli.write_json(path / "result.json", branch)
             row[arm] = branch
@@ -109,8 +120,10 @@ def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=N
             "representations": [r[arm].get("representation") for r in rows]}
             for arm in ("B", "C")}}
     config.update(semantic_repairs=summary["accepted_repair_attempts"], repair_attempts=summary["repair_attempts"],
-        actual_model_transport_invocations=sum(r[a]["configuration"].get("generation_attempts", 0)
-            for r in rows for a in ("A", "initial")) + summary["repair_attempts"])
+        format_repair_calls=sum(r[a]["configuration"].get("format_repair_calls", 0) for r in rows for a in ("A", "initial", "B", "C")),
+        actual_model_transport_invocations=sum(r[a]["configuration"].get("model_transport_invocations", 0) for r in rows for a in ("A", "initial", "B", "C")))
+    # Preserve the reporting alias for total generation and feedback calls.
+    config["actual_generation_transport_invocations"] = config["actual_model_transport_invocations"]
     cli.write_json(directory / "study_configuration.json", config)
     result = {"schema": "canonical_study/2", "status": "completed", "rows": rows, "summary": summary,
         "limitations": [
@@ -118,7 +131,7 @@ def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=N
             "A has no matched TLR review loop: A versus B/C combines generation route and extra inference effort.",
             "Accepted source-grounded revisions are LLM-reviewed, not proven faithful; SAT is not the selection objective.",
             "One review may stop a branch early; equal budgets do not imply equal actual calls.",
-            "Source assumptions and existing symbol meanings remain frozen; corrections requiring context changes need a new source trial.",
+            "The prepared source and engineer-supplied fixed context remain frozen. Generated meanings, domains and assumptions may be corrected with explicit source-grounded context reviews.",
             "Initial/final artifacts and all attempts are retained; default independent judging assesses final candidates only.",
             "No independent SysML read-back, human approval, judge feedback or held-out mutation feedback is included."]}
     cli.write_json(directory / "study.json", result)
@@ -134,7 +147,7 @@ def run_feedback_study(sources, output_dir, repetitions=5, model=None, context=N
             r = row[arm]
             lines.append(f"| {row['repetition']} | {arm} | {r['status']} | {r['compilation']['status']} | {r['configuration'].get('repair_attempts', 0)} | {r['configuration'].get('semantic_repairs', 0)} | {r['admission']} |")
     lines += ["", "Repairs can change supported formulas. Accepted means the edit passed source-grounding, static guards and configured compilation; it is not a semantic fidelity verdict.", "",
-              "The final independent assertion assessment is a separate command. Source-only B never executes Z3. Saved historical audit-only studies remain unchanged."]
+              "The final independent assertion assessment is a separate command. Source-only B never executes Z3."]
     (directory / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if development_scenarios is not None:
         with (directory / "report.md").open("a", encoding="utf-8") as handle:

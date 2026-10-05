@@ -1,0 +1,90 @@
+{
+  "schema": "mbse_obligation_inventory/1",
+  "requirements": [
+    {
+      "id": "BAT-001",
+      "context": [],
+      "obligations": [
+        {
+          "id": "BAT-001.O1",
+          "meaning": "The battery voltage shall be at most 28 V.",
+          "source_basis": [
+            {
+              "source_id": "BAT-001",
+              "quote": "The battery voltage shall be at most 28 V."
+            }
+          ],
+          "kind": "state_constraint",
+          "slots": {
+            "subject": "battery",
+            "scope": "one observation",
+            "quantity": "battery terminal voltage",
+            "unit": "V",
+            "operator": "<=",
+            "bound": "28"
+          },
+          "selection_reason": "A source-defined constraint over one observation.",
+          "limitations": [
+            "No implementation or transition behavior is established."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CTRL-002",
+      "context": [],
+      "obligations": [
+        {
+          "id": "CTRL-002.O1",
+          "meaning": "When maintenance mode is active, motion shall be disabled.",
+          "source_basis": [
+            {
+              "source_id": "CTRL-002",
+              "quote": "When maintenance mode is active, motion shall be disabled."
+            }
+          ],
+          "kind": "state_constraint",
+          "slots": {
+            "subject": "controller",
+            "scope": "one observation",
+            "condition": "maintenance mode is active"
+          },
+          "selection_reason": "A source-defined constraint over one observation.",
+          "limitations": [
+            "No implementation or transition behavior is established."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BAT-003",
+      "context": [],
+      "obligations": [
+        {
+          "id": "BAT-003.O1",
+          "meaning": "When charging is enabled, the charging current shall be at least 0.5 A.",
+          "source_basis": [
+            {
+              "source_id": "BAT-003",
+              "quote": "When charging is enabled, the charging current shall be at least 0.5 A."
+            }
+          ],
+          "kind": "state_constraint",
+          "slots": {
+            "subject": "battery",
+            "scope": "one observation",
+            "condition": "charging is enabled",
+            "quantity": "charging current",
+            "unit": "A",
+            "operator": ">=",
+            "bound": "0.5"
+          },
+          "selection_reason": "A source-defined constraint over one observation.",
+          "limitations": [
+            "No implementation or transition behavior is established."
+          ]
+        }
+      ]
+    }
+  ]
+}

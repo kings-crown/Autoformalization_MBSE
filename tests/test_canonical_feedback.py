@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from canonical_abstractions import POLICY_VERSION
 from canonical_feedback import (FEEDBACK_INSTRUCTIONS, FEEDBACK_POLICY_VERSION,
-    feedback_prompt, solver_feedback, validate_feedback_proposal)
+    feedback_instructions, feedback_prompt, scenario_instructions, solver_feedback,
+    validate_feedback_proposal)
 from canonical_tlr import tlr_context, validate_tlr
 
 
@@ -225,6 +226,209 @@ class ProposalTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError): validate_feedback_proposal(raw, sources, before)
 
 
+class GeneratedContextRepairTests(unittest.TestCase):
+    def review(self, kind, identity, field, source_id='R1', quote=None):
+        sources, _ = fixture()
+        return {'kind': kind, 'id': identity, 'field': field,
+                'reason': 'Correct the generated premise against the unchanged source and retain its independent review obligation.',
+                'source_basis': [{'source_id': source_id, 'quote': quote or sources[0]['text']}]}
+
+    def test_generated_assumption_removal_records_exact_diff_and_invalidates_all_rules(self):
+        sources, before = fixture(); after = deepcopy(before); after['assumptions'] = []
+        raw = envelope(sources, before, after)
+        raw['context_reviews'] = [self.review('assumption', 'ENV', '$record')]
+        snapshot = deepcopy(raw)
+        with patch('mutation_core._execute', side_effect=AssertionError('Guard must not decide using SAT')):
+            result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        changes = result['changes']
+        self.assertTrue(changes['context_changed'])
+        self.assertTrue(changes['progress'])
+        self.assertTrue(changes['requires_source_review'])
+        self.assertEqual(changes['changed_ids'], [])
+        self.assertEqual(changes['affected_requirement_ids'], ['R1', 'R2', 'R3'])
+        change = changes['context_changes'][0]
+        self.assertEqual(change['before'], before['assumptions'][0])
+        self.assertIsNone(change['after'])
+        self.assertTrue(change['before_present'])
+        self.assertFalse(change['after_present'])
+        self.assertEqual(change['source_basis'], raw['context_reviews'][0]['source_basis'])
+        self.assertEqual(raw, snapshot)
+
+    def test_each_changed_symbol_field_has_an_exact_normalized_diff(self):
+        sources, before = fixture(); after = deepcopy(before)
+        after['variables'][0]['description'] = 'Battery terminal voltage at the current observation.'
+        after['variables'][0].pop('bounds')
+        raw = envelope(sources, before, after)
+        raw['context_reviews'] = [self.review('variable', 'voltage', name) for name in ('bounds', 'description')]
+        result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        changes = {change['field']: change for change in result['changes']['context_changes']}
+        self.assertEqual(changes['description']['before'], before['variables'][0]['description'])
+        self.assertEqual(changes['description']['after'], after['variables'][0]['description'])
+        self.assertEqual(changes['bounds']['before'], before['variables'][0]['bounds'])
+        self.assertFalse(changes['bounds']['after_present'])
+        self.assertEqual(result['context_reviews'], raw['context_reviews'])
+
+    def test_generated_context_changes_are_opt_in_and_need_complete_field_reviews(self):
+        sources, before = fixture(); after = deepcopy(before)
+        after['variables'][0]['description'] = 'Corrected meaning of the observed battery voltage.'
+        after['variables'][0].pop('bounds')
+        raw = envelope(sources, before, after)
+        with self.assertRaises(ValueError): validate_feedback_proposal(raw, sources, before)
+        for reviews in (None, [], [self.review('variable', 'voltage', 'description')]):
+            attempt = deepcopy(raw)
+            if reviews is not None: attempt['context_reviews'] = reviews
+            with self.subTest(reviews=reviews), self.assertRaisesRegex(ValueError, 'context_reviews'):
+                validate_feedback_proposal(attempt, sources, before, allow_generated_context_repair=True)
+
+    def test_context_reviews_reject_duplicates_unrelated_fields_empty_or_fabricated_evidence(self):
+        sources, before = fixture(); after = deepcopy(before); after['assumptions'] = []
+        good = self.review('assumption', 'ENV', '$record')
+        for kind in ('duplicate', 'unrelated', 'empty', 'fabricated', 'unknown_source', 'generic', 'before_after'):
+            raw = envelope(sources, before, after); raw['context_reviews'] = [deepcopy(good)]
+            review = raw['context_reviews'][0]
+            if kind == 'duplicate': raw['context_reviews'].append(deepcopy(good))
+            elif kind == 'unrelated': review['field'] = 'text'
+            elif kind == 'empty': review['source_basis'] = []
+            elif kind == 'fabricated': review['source_basis'][0]['quote'] = 'Imaginary source permission.'
+            elif kind == 'unknown_source': review['source_basis'][0]['source_id'] = 'MISSING'
+            elif kind == 'generic': review['reason'] = 'unsupported'
+            else: review['before'] = {'predicate': True}
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+
+    def test_context_source_excerpts_are_allowed_but_document_keys_are_not_quotes(self):
+        sources, before = fixture(); after = deepcopy(before)
+        after['variables'][0]['description'] = 'Battery voltage measured within the source observation domain.'
+        raw = envelope(sources, before, after)
+        raw['context_reviews'] = [self.review('variable', 'voltage', 'description', quote='Measurements lie between 0 V and 100 V.')]
+        validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        raw['context_reviews'][0]['source_basis'][0]['quote'] = 'domain'
+        with self.assertRaisesRegex(ValueError, 'literal source/context'):
+            validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+
+    def test_source_ids_and_words_remain_immutable_under_generated_context_policy(self):
+        sources, before = fixture(); after = deepcopy(before); after['assumptions'] = []
+        for key, value in [('text', 'The voltage may exceed 28 V.'), ('source', {'context': 'Invented context.'})]:
+            raw = envelope(sources, before, after)
+            raw['context_reviews'] = [self.review('assumption', 'ENV', '$record')]
+            raw['tlr']['requirements'][0][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'differs from prepared source'):
+                validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+
+    def test_fixed_context_is_frozen_even_with_complete_change_rationale(self):
+        sources, before = fixture(); context = tlr_context(before)
+        for mode in ('assumption', 'description', 'bounds'):
+            after = deepcopy(before)
+            if mode == 'assumption':
+                after['assumptions'] = []
+                review = self.review('assumption', 'ENV', '$record')
+            else:
+                if mode == 'description': after['variables'][0][mode] = 'An altered variable meaning.'
+                else: after['variables'][0].pop(mode)
+                review = self.review('variable', 'voltage', mode)
+            raw = envelope(sources, before, after); raw['context_reviews'] = [review]
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                validate_feedback_proposal(raw, sources, before, context, allow_generated_context_repair=True)
+
+    def test_generated_context_policy_allows_existing_envelope_when_shared_context_unchanged(self):
+        sources, before = fixture(); raw = envelope(sources, before, corrected(before))
+        result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        self.assertFalse(result['changes']['context_changed'])
+        self.assertEqual(result['changes']['context_changes'], [])
+        self.assertEqual(result['changes']['affected_requirement_ids'], ['R1'])
+        self.assertTrue(result['changes']['requires_source_review'])
+        self.assertEqual(result['context_reviews'], [])
+        raw = envelope(sources, before); raw['context_reviews'] = []
+        result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        self.assertFalse(result['changes']['progress'])
+        self.assertFalse(result['changes']['requires_source_review'])
+
+    def test_new_symbol_addition_and_unused_symbol_removal_need_record_reviews(self):
+        sources, before = fixture(); after = recover(before)
+        raw = envelope(sources, before, after)
+        with self.assertRaisesRegex(ValueError, 'context_reviews'):
+            validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        raw['context_reviews'] = [self.review('variable', 'unicast_available', '$record', 'R2', sources[1]['text'])]
+        result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        self.assertEqual(result['changes']['added_symbols'], ['unicast_available'])
+        self.assertFalse(result['changes']['context_changes'][0]['before_present'])
+        after = deepcopy(before); after['variables'].pop(1); after['assumptions'] = []
+        raw = envelope(sources, before, after)
+        raw['context_reviews'] = [self.review('variable', 'power', '$record'), self.review('assumption', 'ENV', '$record')]
+        result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        self.assertEqual(result['changes']['removed_symbols'], ['power'])
+
+    def test_assumption_field_edits_and_additions_are_recorded_but_not_semantically_approved(self):
+        sources, before = fixture(); after = deepcopy(before)
+        after['assumptions'][0]['text'] = 'The power condition is unspecified in this prepared source.'
+        after['assumptions'][0]['predicate'] = {'op': 'not', 'args': [{'var': 'power'}]}
+        after['assumptions'].append({'id': 'BOUND', 'text': 'Proposed measurement domain.',
+                                    'predicate': {'op': '>=', 'args': [{'var': 'voltage'}, {'value': '0', 'unit': 'V'}]}})
+        raw = envelope(sources, before, after)
+        raw['context_reviews'] = [self.review('assumption', 'ENV', field) for field in ('predicate', 'text')]
+        raw['context_reviews'].append(self.review('assumption', 'BOUND', '$record', quote='Measurements lie between 0 V and 100 V.'))
+        result = validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+        self.assertEqual(len(result['changes']['context_changes']), 3)
+        self.assertTrue(result['changes']['requires_source_review'])
+        self.assertNotIn('accepted', result)
+
+    def test_new_unused_symbol_is_rejected_even_with_literal_rationale(self):
+        sources, before = fixture(); after = deepcopy(before)
+        after['variables'].append({'name': 'unused', 'type': 'Bool', 'description': 'A named but unused generated symbol.'})
+        raw = envelope(sources, before, after)
+        raw['context_reviews'] = [self.review('variable', 'unused', '$record')]
+        with self.assertRaisesRegex(ValueError, 'must be referenced'):
+            validate_feedback_proposal(raw, sources, before, allow_generated_context_repair=True)
+
+    def test_prompt_selects_generated_policy_without_relaxing_input_or_evaluation_boundaries(self):
+        sources, before = fixture()
+        payload = json.loads(feedback_prompt(sources, None, before, allow_generated_context_repair=True))
+        self.assertTrue(payload['generated_context_policy']['generated_context_repair_permitted'])
+        payload = json.loads(feedback_prompt(sources, tlr_context(before), before, allow_generated_context_repair=True))
+        self.assertFalse(payload['generated_context_policy']['generated_context_repair_permitted'])
+        self.assertTrue(payload['generated_context_policy']['fixed_context_immutable'])
+        self.assertEqual(feedback_instructions(), FEEDBACK_INSTRUCTIONS)
+        instructions = feedback_instructions(True)
+        for text in ('LLM-generated variables', 'context_reviews', 'not independent semantic approval',
+                     'engineer input revision', 'final judges', 'literal quotations alone'):
+            self.assertIn(text, instructions)
+        self.assertNotIn("every existing variable's name/type/unit/bounds/description", instructions)
+        self.assertIn('LLM-generated meanings and premises may be corrected', scenario_instructions(True))
+        self.assertIn('Supplied source, fixed_context and explicit development definitions', scenario_instructions(True))
+
+    def test_context_policy_requires_explicit_boolean_opt_in(self):
+        sources, before = fixture()
+        for value in ('true', 1, None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError): feedback_instructions(value)
+                with self.assertRaises(ValueError): scenario_instructions(value)
+                with self.assertRaises(ValueError): feedback_prompt(sources, None, before, allow_generated_context_repair=value)
+                with self.assertRaises(ValueError):
+                    validate_feedback_proposal(envelope(sources, before), sources, before, allow_generated_context_repair=value)
+
+    def test_development_assistance_while_source_review_pending_is_explicit_and_not_solver_evidence(self):
+        from test_canonical_scenarios import fixture as scenario_fixture
+        sources, before, suite = scenario_fixture()
+        before['abstraction_policy'] = POLICY_VERSION
+        before['requirements'][0]['abstraction'] = {
+            'kind': 'state_constraint', 'meaning': 'Inclusive source bound.',
+            'scope': 'One observation of the integer value.', 'limitations': []}
+        with self.assertRaisesRegex(ValueError, 'requires solver feedback'):
+            feedback_prompt(sources, None, before, development_scenarios=suite)
+        payload = json.loads(feedback_prompt(sources, None, before, development_scenarios=suite,
+            development_results={'status': 'not_run', 'reason': 'Source review pending'},
+            allow_pending_source_review=True))
+        self.assertIsNone(payload['solver_feedback'])
+        self.assertEqual(payload['feedback_mode'], 'source_review_before_solver')
+        self.assertEqual(payload['solver_availability']['status'], 'not_run')
+        self.assertIn('pending source-to-rule acceptance', payload['solver_availability']['reason'])
+        self.assertEqual(payload['development_results']['status'], 'not_run')
+        self.assertEqual([row['id'] for row in payload['development_scenarios']['scenarios']], ['boundary', 'violation'])
+        self.assertEqual([row['expected'] for row in payload['development_scenarios']['scenarios']], ['sat', 'unsat'])
+        with self.assertRaisesRegex(ValueError, 'Boolean'):
+            feedback_prompt(sources, None, before, allow_pending_source_review='yes')
+
+
 class EvidenceAndPromptTests(unittest.TestCase):
     def test_exact_queries_results_and_sat_witness_survive_without_evaluation_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -355,7 +559,7 @@ class EvidenceAndPromptTests(unittest.TestCase):
             self.assertEqual(len(first['selection']['omitted_queries']), 10)
 
     def test_instructions_do_not_treat_expected_audit_results_as_defects(self):
-        self.assertEqual(FEEDBACK_POLICY_VERSION, 'source_grounded_semantic_feedback/1')
+        self.assertEqual(FEEDBACK_POLICY_VERSION, 'source_grounded_semantic_feedback/3')
         for phrase in ('SAT violatability query is ordinarily expected', 'UNSAT redundancy can be legitimate',
                        'real conflict in the unchanged source must remain visible',
                        'Previously supported formulas MAY change', 'loss of formal coverage',

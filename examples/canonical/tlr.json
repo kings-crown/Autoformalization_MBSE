@@ -59,7 +59,28 @@
         "limitations": [
           "No transition relation or implementation realization is established."
         ]
-      }
+      },
+      "coverage": [
+        {
+          "obligation_id": "BAT-001.O1",
+          "status": "represented",
+          "formula_path": "/formula",
+          "slots": {
+            "quantity": [
+              "/formula/args/0"
+            ],
+            "operator": [
+              "/formula"
+            ],
+            "bound": [
+              "/formula/args/1"
+            ],
+            "unit": [
+              "/formula/args/1"
+            ]
+          }
+        }
+      ]
     },
     {
       "id": "CTRL-002",
@@ -87,7 +108,19 @@
         "limitations": [
           "No transition relation or implementation realization is established."
         ]
-      }
+      },
+      "coverage": [
+        {
+          "obligation_id": "CTRL-002.O1",
+          "status": "represented",
+          "formula_path": "/formula",
+          "slots": {
+            "condition": [
+              "/formula/args/0"
+            ]
+          }
+        }
+      ]
     },
     {
       "id": "BAT-003",
@@ -119,7 +152,31 @@
         "limitations": [
           "No transition relation or implementation realization is established."
         ]
-      }
+      },
+      "coverage": [
+        {
+          "obligation_id": "BAT-003.O1",
+          "status": "represented",
+          "formula_path": "/formula",
+          "slots": {
+            "condition": [
+              "/formula/args/0"
+            ],
+            "quantity": [
+              "/formula/args/1/args/0"
+            ],
+            "operator": [
+              "/formula/args/1"
+            ],
+            "bound": [
+              "/formula/args/1/args/1"
+            ],
+            "unit": [
+              "/formula/args/1/args/1"
+            ]
+          }
+        }
+      ]
     }
   ],
   "abstraction_policy": "mbse_abstraction/1"

@@ -70,6 +70,9 @@ def compiled(*args, **kwargs):
     return {'status': 'passed', 'diagnostics': []}
 
 
+from source_review_support import pass_source_review
+
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ScenarioConfigurationTests(unittest.TestCase):
     def test_development_assistance_requires_C_and_positive_budget_before_writes_or_calls(self):
         sources, tlr, suite = fixture()
@@ -133,6 +136,7 @@ class ScenarioConfigurationTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which('z3'), 'Local Z3 required; provider calls remain mocked')
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ScenarioExecutionTests(unittest.TestCase):
     def test_invalid_initial_development_context_stops_before_any_model_call(self):
         for defect in ('definition', 'background', 'encoding'):
@@ -230,6 +234,17 @@ class ScenarioExecutionTests(unittest.TestCase):
 
     def test_cli_study_exposes_suite_only_to_C_review_not_A_initial_or_B(self):
         sources, initial, suite = fixture('27')
+        inventory = {'schema': 'mbse_obligation_inventory/1', 'requirements': [{
+            'id': 'R1', 'context': [{'source_id': 'DEF_LIMIT', 'role': 'definition',
+                'reason': 'Defines inclusion of the boundary.'}], 'obligations': [{
+                'id': 'R1.O1', 'meaning': sources[0]['text'], 'kind': 'state_constraint',
+                'source_basis': [{'source_id': 'R1', 'quote': sources[0]['text']}],
+                'slots': {'subject': 'battery', 'scope': 'one observation', 'quantity': 'voltage',
+                          'operator': '<=', 'bound': '28', 'unit': 'V'},
+                'selection_reason': 'An inclusive source-defined scalar limit.', 'limitations': []}]}]}
+        initial['requirements'][0]['coverage'] = [{'obligation_id': 'R1.O1', 'status': 'represented',
+            'formula_path': '/formula', 'slots': {'quantity': ['/formula/args/0'], 'operator': ['/formula'],
+                                                'bound': ['/formula/args/1'], 'unit': ['/formula/args/1']}}]
         seen = []
         def generate(system, prompt, model, directory, call_id):
             payload = json.loads(prompt)
@@ -237,7 +252,7 @@ class ScenarioExecutionTests(unittest.TestCase):
             seen.append((arm, call_id, payload))
             if system == cli.SYSML_INSTRUCTIONS:
                 return 'package DirectCandidate {}'
-            if system == cli.TLR_INSTRUCTIONS:
+            if system.startswith(cli.TLR_INSTRUCTIONS):
                 return json.dumps(initial)
             current = payload['current_tlr']
             after = bound_changed(current, '28') if arm == 'C' else current
@@ -247,6 +262,7 @@ class ScenarioExecutionTests(unittest.TestCase):
             root = Path(tmp)
             cli.write_json(root / 'sources.json', sources)
             cli.write_json(root / 'suite.json', suite)
+            cli.write_json(root / 'inventory.json', inventory)
             code = cli.main(['study', '--statement', str(root / 'sources.json'), '--model', 'fixture',
                 '--repetitions', '1', '--feedback-repairs', '1', '--development-scenarios', str(root / 'suite.json'),
                 '--output-dir', str(root / 'study')])
@@ -258,8 +274,9 @@ class ScenarioExecutionTests(unittest.TestCase):
             for arm, call_id, payload in seen:
                 if arm == 'C':
                     self.assertIn('development_scenarios', payload)
-                    self.assertEqual(payload['development_results']['counts']['failed'], 1)
+                    self.assertEqual(payload['development_results']['status'], 'failed')
                     self.assertIsNotNone(payload['solver_feedback'])
+                    self.assertNotIn('source_review', payload)
                 else:
                     self.assertNotIn('development_scenarios', payload)
                     self.assertNotIn('development_results', payload)

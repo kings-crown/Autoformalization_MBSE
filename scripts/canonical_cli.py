@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 import time
 from canonical_abstractions import POLICY_VERSION, POLICY, POLICY_TEXT, PROFILE, representation_summary
-from canonical_repair import RECOVERY_POLICY_VERSION
+from mutation_core import STATIC_MAX_VARIABLES
 
 ROOT = Path(__file__).resolve().parents[1]
 TLR_INSTRUCTIONS = '''Return a single JSON object, schema "mbse_tlr/1". Required keys:
@@ -31,6 +31,7 @@ Do not return SysML, solver outcomes, approvals, hashes, or provenance certifica
 SYSML_INSTRUCTIONS = '''Return only SysML v2 textual syntax for the supplied source requirements. Use one package with ScalarValues, a shared subject part definition with Boolean/Integer/Real attributes, and one requirement usage per source ID with actual require constraints for supported obligations. Retain exact source text in documentation. Numeric attributes denote canonical magnitudes; document their units. Preserve conditions, inclusive/exclusive bounds, quantity identities and genuine environmental assumptions. Unsupported temporal, probabilistic or otherwise unrepresentable clauses must remain explicitly documented as unsupported; do not invent Boolean placeholders or extra architecture. Use the supplied fixed vocabulary/background if present. Do not output TLR, SMT, explanations, approvals, hashes or invented verification results.'''
 
 TLR_INSTRUCTIONS += "\n" + POLICY_TEXT
+TLR_INSTRUCTIONS = TLR_INSTRUCTIONS.replace("at most 24 variables", f"at most {STATIC_MAX_VARIABLES} variables")
 SYSML_INSTRUCTIONS += "\nDocument each supported requirement's abstraction kind, meaning, scope and limitations; for a capability also its subject, operation and bound Boolean symbol. Define every referenced attribute's meaning. When fixed_context supplies symbol_meanings, preserve those definitions in the corresponding attribute documentation. Use the same abstraction kinds and limits as the shared policy, without emitting JSON or TLR.\n" + POLICY_TEXT
 
 
@@ -140,9 +141,8 @@ def _strip_fence(text):
 
 def _prompt(sources, context, name):
     return json.dumps({"model_name": name, "representation_profile": PROFILE,
-                       "abstraction_policy": POLICY,
-                       "requirements": [{k: r[k] for k in ("id", "text", "source") if k in r} for r in sources],
-                       "fixed_context": context}, ensure_ascii=False, indent=2)
+        "abstraction_policy": POLICY, "requirements": sources, "fixed_context": context},
+        ensure_ascii=False, indent=2)
 
 
 def _compile(path, enabled):
@@ -180,12 +180,91 @@ def _normalize_candidate(raw, sources, context, require_abstractions):
     return normalized
 
 
+def _review_ask(system, prompt, model, directory, call_id):
+    """Separate inference call; never inherit a generator's returned verdict."""
+    return _ask(system, prompt, model, directory, call_id)
+
+
+def _recovery_budget(value, label):
+    if type(value) is not int or value not in (0, 1):
+        raise ValueError(f"{label} must be 0 or 1")
+
+
+def _generate_initial_tlr(sources, context, directory, instructions, prompt, model, ask,
+                          budget, configuration):
+    """Correct only malformed generated drafts before normal conversion."""
+    ledger = {"schema": "initial_tlr_format_recovery/1", "budget": budget,
+              "correction_calls": 0, "attempts": [], "stop_reason": None}
+    history = directory / "format_attempts"
+    if budget:
+        history.mkdir()
+    previous = diagnostic = None
+    try:
+        for index in range(budget + 1):
+            target = history / f"{index:03d}" if budget else directory
+            if budget:
+                target.mkdir()
+            call_prompt, call_instructions = prompt, instructions
+            if index:
+                call_prompt = json.dumps({"original_request": json.loads(prompt),
+                    "previous_response": previous, "validation_error": diagnostic}, ensure_ascii=False, indent=2)
+                call_instructions += ("\nThis is a separately budgeted initial format/schema correction. "
+                    "Return a complete corrected TLR for the unchanged original request. Correct the reported "
+                    "JSON/schema/type/profile defect while preserving source meaning, every original requirement "
+                    "ID, literal wording, context. Do not drop clauses, invent assumptions, "
+                    "or weaken meaning to satisfy validation. No semantic review "
+                    "or solver feedback is provided; semantic assessment remains separate.")
+                configuration["format_repair_calls"] += 1
+                ledger["correction_calls"] += 1
+            else:
+                configuration["generation_attempts"] = 1
+            attempt = {"index": index, "status": "running"}
+            ledger["attempts"].append(attempt)
+            try:
+                response = ask(call_instructions, call_prompt, model,
+                    target if index else directory, "format_correction" if index else "generation")
+            except Exception as exc:
+                attempt.update(status="transport_error", error=f"{type(exc).__name__}: {exc}")
+                ledger["stop_reason"] = "transport_error"
+                raise
+            previous = response
+            if index == 0:
+                (directory / "generation_response.txt").write_text(response, encoding="utf-8")
+            if budget:
+                (target / "response.txt").write_text(response, encoding="utf-8")
+                write_json(target / "request.json", {"instructions": call_instructions, "prompt": json.loads(call_prompt)})
+            candidate_path = directory / "candidate_tlr.json"
+            candidate_path.write_text(_strip_fence(response), encoding="utf-8")
+            if budget:
+                (target / "candidate_tlr.json").write_text(_strip_fence(response), encoding="utf-8")
+            try:
+                normalized = _normalize_candidate(read_json(candidate_path), sources, context, True)
+            except (ValueError, TypeError, KeyError) as exc:
+                diagnostic = f"{type(exc).__name__}: {exc}"
+                attempt.update(status="invalid_candidate", error=diagnostic)
+                if budget:
+                    write_json(target / "validation.json", attempt)
+                if index < budget:
+                    continue
+                ledger["stop_reason"] = "budget_exhausted" if budget else "disabled"
+                raise
+            attempt["status"] = "validated"
+            ledger["stop_reason"] = "validated"
+            if budget:
+                write_json(target / "validation.json", attempt)
+            return normalized
+    finally:
+        write_json(directory / "format_recovery.json", ledger)
+
+
 def _materialize_candidate(directory, candidate, tlr, condition, compile_model, solver, timeout):
     from canonical_sysml_screen import requirement_content
-    result = {"model_file": "model.sysml", "tlr": tlr, "admission": "not_assessed"}
+    result = {"model_file": "model.sysml", "tlr": tlr, "admission": "not_assessed", "source_fidelity": "not_assessed"}
     if tlr is not None:
         write_json(directory / "tlr.json", tlr)
         result["representation"] = representation_summary(tlr)
+        emitted = [r["id"] for r in tlr["requirements"] if r["status"] == "supported"]
+        result["representation"].update(constraints_emitted=len(emitted), emitted_requirement_ids=emitted)
         write_json(directory / "representation.json", result["representation"])
     path = directory / "model.sysml"
     path.write_text(candidate, encoding="utf-8")
@@ -213,6 +292,12 @@ def _copy_candidate(source, destination):
     for name in _CANDIDATE_FILES:
         src, dst = source / name, destination / name
         if not src.exists():
+            # Selecting an empty/partial attempt must not retain executable artifacts
+            # from an older attempt. These are this run's generated files only.
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            elif dst.exists():
+                dst.unlink()
             continue
         if src.is_dir():
             # Only this run's generated evidence is replaced. Attempt histories
@@ -224,155 +309,12 @@ def _copy_candidate(source, destination):
             shutil.copy2(src, dst)
 
 
-def _recover_abstentions(initial, sources, context, directory, budget, ask, model, name,
-                         condition, compile_model, solver, timeout):
-    from canonical_repair import (DIAGNOSIS_INSTRUCTIONS, REPAIR_INSTRUCTIONS,
-                                  diagnosis_prompt, repair_prompt, validate_diagnosis,
-                                  validate_proposal, validate_repair)
-    from canonical_tlr import render_sysml
-    def abstentions(value):
-        return [row["id"] for row in value["tlr"]["requirements"] if row["status"] != "supported"]
-    initial_ids = abstentions(initial)
-    ledger = {"schema": "abstention_recovery/1", "policy": RECOVERY_POLICY_VERSION,
-        "budget": budget, "max_additional_transport_invocations": 2 * budget,
-        "diagnosis_calls": 0, "repair_attempts": 0, "accepted_repairs": 0,
-        "initial_abstained_ids": initial_ids, "recovered_ids": [], "retained_ids": initial_ids,
-        "overridden_diagnosis_ids": [], "diagnosis_advisory": True,
-        "selected_attempt": "initial", "steps": [], "status": "running", "stop_reason": None,
-        "feedback": "Prepared source/context, abstraction policy, current TLR, and internal validation errors only.",
-        "source_fidelity": "unassessed; diagnosis and recovery are LLM-reviewed, not engineer-approved"}
-    selected, selected_dir = initial, directory
-    def save():
-        ledger["retained_ids"] = abstentions(selected)
-        ledger["recovered_ids"] = [rid for rid in initial_ids if rid not in ledger["retained_ids"]]
-        write_json(directory / "repair.json", ledger)
-    if not initial_ids:
-        ledger["stop_reason"] = "no_abstentions"
-    elif not budget:
-        ledger["stop_reason"] = "disabled_by_policy"
-    elif initial["tlr"].get("abstraction_policy") != POLICY_VERSION:
-        ledger["stop_reason"] = "legacy_profile_requires_explicit_conversion"
-    elif compile_model and initial["compilation"].get("status") != "passed":
-        ledger["stop_reason"] = "initial_compilation_failed"
-    else:
-        selected_dir = directory / "attempts" / "000"
-        selected_dir.mkdir(parents=True)
-        _copy_candidate(directory, selected_dir)
-        write_json(selected_dir / "attempt.json", {"status": "initial", "accepted": True})
-        ledger["selected_attempt"] = "attempts/000"
-        failure = None
-        save()
-        for index in range(1, budget + 1):
-            attempt_dir = directory / "attempts" / f"{index:03d}"
-            attempt_dir.mkdir()
-            step = {"index": index, "directory": str(attempt_dir.relative_to(directory)),
-                    "diagnosis_status": "running", "proposal_status": "not_requested",
-                    "eligible_ids": abstentions(selected), "diagnosis_recommended_ids": [],
-                    "overridden_diagnosis_ids": [],
-                    "compilation": {"status": "not_run"}, "analysis": {"status": "not_run"}}
-            ledger["steps"].append(step)
-            save()
-            diagnosis = None
-            try:
-                prompt = diagnosis_prompt(sources, context, selected["tlr"], previous_failure=failure)
-                ledger["diagnosis_calls"] += 1
-                save()
-                response = ask(DIAGNOSIS_INSTRUCTIONS, prompt, model, attempt_dir, "diagnosis_call")
-                (attempt_dir / "diagnosis_response.txt").write_text(response, encoding="utf-8")
-                (attempt_dir / "diagnosis_candidate.json").write_text(_strip_fence(response), encoding="utf-8")
-                diagnosis = validate_diagnosis(read_json(attempt_dir / "diagnosis_candidate.json"), sources, selected["tlr"])
-                write_json(attempt_dir / "diagnosis.json", diagnosis)
-                step["diagnosis_status"] = "completed"
-                step["diagnosis_recommended_ids"] = [row["id"] for row in diagnosis["requirements"]
-                                                     if row["decision"] == "repair"]
-            except Exception as exc:
-                # Invalid advice is retained as evidence, never as authority or
-                # a reason to suppress this round's bounded proposal attempt.
-                diagnosis = None
-                step.update(diagnosis_status="failed", diagnosis_error=f"{type(exc).__name__}: {exc}")
-            step["proposal_status"] = "running"
-            save()
-            artifact_phase = False
-            try:
-                prompt = repair_prompt(sources, context, selected["tlr"], diagnosis, previous_failure=failure)
-                ledger["repair_attempts"] += 1
-                save()
-                instructions = (REPAIR_INSTRUCTIONS +
-                    "\nThe following instructions apply only to the nested 'tlr' member, "
-                    "not to the response envelope:\n<tlr_schema_instructions>\n" + TLR_INSTRUCTIONS +
-                    "\n</tlr_schema_instructions>\nReturn the outer abstention_proposal/1 envelope.")
-                response = ask(instructions, prompt, model, attempt_dir, "repair_call")
-                (attempt_dir / "repair_response.txt").write_text(response, encoding="utf-8")
-                (attempt_dir / "proposal_candidate.json").write_text(_strip_fence(response), encoding="utf-8")
-                raw = read_json(attempt_dir / "proposal_candidate.json")
-                if isinstance(raw, dict) and "tlr" in raw:
-                    write_json(attempt_dir / "candidate_tlr.json", raw["tlr"])
-                proposal = validate_proposal(raw, sources, selected["tlr"])
-                write_json(attempt_dir / "proposal.json", proposal)
-                write_json(attempt_dir / "proposal_reviews.json", proposal["reviews"])
-                proposed = _normalize_candidate(proposal["tlr"], sources, context, True)
-                changes = validate_repair(selected["tlr"], proposed, diagnosis, fixed_context=context)
-                step["changes"] = changes
-                write_json(attempt_dir / "tlr.json", proposed)
-                if not changes["progress"]:
-                    step["proposal_status"] = "no_progress_after_proposal"
-                    ledger["stop_reason"] = "no_progress_after_proposal"
-                    write_json(attempt_dir / "attempt.json", step)
-                    break
-                artifact_phase = True
-                artifacts = _materialize_candidate(attempt_dir, render_sysml(proposed, name), proposed,
-                                                   condition, compile_model, solver, timeout)
-                step.update(compilation=artifacts["compilation"], analysis=artifacts["analysis"])
-                if compile_model and artifacts["compilation"].get("status") != "passed":
-                    step["proposal_status"] = "rejected"
-                    step["error"] = "Generated SysML did not compile; investigate the renderer before further semantic changes."
-                    ledger["stop_reason"] = "proposal_compilation_failed"
-                    write_json(attempt_dir / "attempt.json", step)
-                    break
-                # Acceptance depends on structural recovery and optional compilation,
-                # never on SAT, judge scores, or a held-out mutation comparison.
-                selected, selected_dir = artifacts, attempt_dir
-                ledger["accepted_repairs"] += 1
-                ledger["selected_attempt"] = str(attempt_dir.relative_to(directory))
-                step["proposal_status"] = "accepted"
-                if diagnosis is not None:
-                    step["overridden_diagnosis_ids"] = [rid for rid in changes["recovered_ids"]
-                                                        if rid not in step["diagnosis_recommended_ids"]]
-                    ledger["overridden_diagnosis_ids"].extend(step["overridden_diagnosis_ids"])
-                failure = None
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                step.update(proposal_status="rejected", error=error)
-                # Keep complete errors on disk, but bounded prompt feedback must
-                # not itself disable the next round's diagnosis/proposal calls.
-                failure = error if len(error) <= 12000 else error[:11900] + " [truncated; full error in previous attempt.json]"
-                if artifact_phase:
-                    # Tool/renderer failures are recorded, never fed back as an
-                    # invitation to change the source interpretation.
-                    ledger["stop_reason"] = "candidate_check_failed"
-                    write_json(attempt_dir / "attempt.json", step)
-                    break
-            write_json(attempt_dir / "attempt.json", step)
-            if not abstentions(selected):
-                ledger["stop_reason"] = "all_supported"
-                break
-            save()
-        if selected_dir != directory:
-            _copy_candidate(selected_dir, directory)
-    ledger["status"] = "completed"
-    if ledger["stop_reason"] is None:
-        ledger["stop_reason"] = "budget_exhausted"
-    save()
-    return selected, ledger
-
-
-
 def _refine_with_feedback(initial, sources, context, directory, budget, ask, model, name,
                           condition, compile_model, solver, timeout, development_scenarios=None):
     """Matched source review / Z3-informed review with no evaluator feedback."""
-    from canonical_feedback import (FEEDBACK_POLICY_VERSION, FEEDBACK_INSTRUCTIONS,
+    from canonical_feedback import (FEEDBACK_POLICY_VERSION, feedback_instructions,
                                     feedback_prompt, solver_feedback, validate_feedback_proposal,
-                                    SCENARIO_POLICY_VERSION, SCENARIO_INSTRUCTIONS)
+                                    SCENARIO_POLICY_VERSION, scenario_instructions)
     from canonical_tlr import render_sysml
     mode = "solver" if condition == "C" else "source"
     selected, selected_dir = initial, directory
@@ -428,13 +370,13 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                     write_json(attempt_dir / "solver_feedback.json", feedback)
                 prompt = feedback_prompt(sources, context, selected["tlr"], feedback, previous_failure=failure,
                     development_scenarios=development_scenarios, development_results=development_results,
-                    previous_semantic_comparison=semantic_comparison)
+                    previous_semantic_comparison=semantic_comparison, allow_generated_context_repair=True)
                 write_json(attempt_dir / "prompt.json", json.loads(prompt))
-                instructions = (FEEDBACK_INSTRUCTIONS +
+                instructions = (feedback_instructions(True) +
                     "\nThe following schema instructions apply to the nested tlr member:\n" + TLR_INSTRUCTIONS +
                     "\nReturn the outer semantic_repair_proposal/1 envelope, not a bare TLR.")
                 if development_scenarios is not None:
-                    instructions += "\n" + SCENARIO_INSTRUCTIONS
+                    instructions += "\n" + scenario_instructions(True)
                 ledger["repair_attempts"] += 1
                 save()
                 response = ask(instructions, prompt, model, attempt_dir, "feedback_call")
@@ -443,9 +385,10 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                 raw = read_json(attempt_dir / "proposal_candidate.json")
                 if isinstance(raw, dict) and "tlr" in raw:
                     write_json(attempt_dir / "candidate_tlr.json", raw["tlr"])
-                proposal = validate_feedback_proposal(raw, sources, selected["tlr"], fixed_context=context)
+                proposal = validate_feedback_proposal(raw, sources, selected["tlr"], fixed_context=context, allow_generated_context_repair=True)
                 write_json(attempt_dir / "proposal.json", proposal)
                 write_json(attempt_dir / "proposal_reviews.json", proposal["reviews"])
+                write_json(attempt_dir / "context_reviews.json", proposal.get("context_reviews", []))
                 proposed, changes = proposal["tlr"], proposal["changes"]
                 step["changes"] = changes
                 write_json(attempt_dir / "tlr.json", proposed)
@@ -513,14 +456,38 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
     return selected, ledger
 
 
+def _check_retired_options(options):
+    neutral = {"reviewer": None, "source_review_model": None, "previous_source_review": None,
+        "previous_inventory_review": None, "obligation_inventory": None,
+        "require_obligation_inventory": False, "inventory_repairs": 0, "review_repairs": 0,
+        "require_pattern_diagnostics": False}
+    for key, value in options.items():
+        if key not in neutral or value is not None and value != neutral[key]:
+            raise ValueError(f"{key} belongs to the retired inventory/review gate. Use the source packet and --feedback-repairs; replay historical runs with their frozen implementation.")
+
+
+def _feedback_budget(feedback, abstention=0):
+    _repair_budget(feedback, "Feedback repair budget")
+    _repair_budget(abstention, "Deprecated abstention budget")
+    if feedback and abstention:
+        raise ValueError("Use only --feedback-repairs; --abstention-repairs is its deprecated alias")
+    return feedback or abstention
+
+
 def run_candidate(sources, output_dir, condition="C", model=None, name="RequirementsModel", context=None,
                   tlr=None, sysml_text=None, compile_model=True, solver="z3", timeout_seconds=10.0,
-                  generator=None, abstention_repairs=0, feedback_repairs=0, development_scenarios=None):
-    """One initial generation plus an explicit bounded recovery policy; B never calls Z3."""
-    _repair_budget(abstention_repairs)
-    _repair_budget(feedback_repairs, "Feedback repair budget")
-    if feedback_repairs and abstention_repairs:
-        raise ValueError("Choose either abstention recovery or semantic feedback repair, not both")
+                  generator=None, abstention_repairs=0, feedback_repairs=0, development_scenarios=None,
+                  format_repairs=0, **retired_options):
+    """Convert a fixed source packet; one source-grounded feedback controller.
+
+    Supported typed rules are draft constraints, not independently approved rules.
+    The old abstention budget aliases this same controller; no second loop runs.
+    """
+    _check_retired_options(retired_options)
+    feedback_repairs = _feedback_budget(feedback_repairs, abstention_repairs)
+    _recovery_budget(format_repairs, "Initial format correction budget")
+    if condition not in {"A", "B", "C", "BC"}:
+        raise ValueError("Condition must be A, B, C or BC")
     if feedback_repairs and condition not in {"B", "C"}:
         raise ValueError("Feedback repair requires separate B or C candidates; A/BC are not eligible")
     if development_scenarios is not None:
@@ -528,57 +495,52 @@ def run_candidate(sources, output_dir, condition="C", model=None, name="Requirem
             raise ValueError("Development scenarios require condition C and a positive feedback repair budget")
         from canonical_scenarios import validate_scenario_suite
         development_scenarios = validate_scenario_suite(development_scenarios, sources)
-    if condition not in {"A", "B", "C", "BC"}:
-        raise ValueError("Condition must be A, B, C or BC")
-    if condition == "A" and abstention_repairs:
-        raise ValueError("Abstention repair applies to TLR conditions B/C; A has no TLR")
     if tlr is not None and condition == "A" or sysml_text is not None and condition != "A":
         raise ValueError("A accepts only supplied SysML; B/C accept only supplied TLR")
-    context = _fixed_context(context)
+    context, model = _fixed_context(context), _model(model)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=False)
     write_json(directory / "sources.json", sources)
-    if development_scenarios is not None:
-        write_json(directory / "development_suite.json", development_scenarios)
     if context is not None:
         write_json(directory / "context.json", context)
-    model = _model(model)
-    offline = tlr is not None or sysml_text is not None
-    configuration = {"schema": "canonical_execution/1", "condition": condition, "model": model,
-                     "generation_mode": "supplied_artifact" if offline else "LLM",
-                     "generation_attempts": 0 if offline else 1, "semantic_repairs": 0,
-                     "abstention_repair_budget": abstention_repairs, "diagnosis_calls": 0, "repair_attempts": 0,
-                     "max_model_transport_invocations": (0 if offline else 1) + 2 * abstention_repairs + feedback_repairs,
-                     "feedback_repair_budget": feedback_repairs,
-                     "feedback_mode": ("solver" if condition == "C" else "source") if feedback_repairs else "none",
-                     "repair_policy": RECOVERY_POLICY_VERSION,
-                     "profile": PROFILE, "compile_enabled": compile_model, "solver": solver,
-                     "abstraction_policy": POLICY,
-                     "solver_timeout_seconds": timeout_seconds, "fixed_context": context is not None,
-                     "provider_settings": {"reasoning_effort": os.getenv("CODEX_REASONING_EFFORT", "low"),
-                                           "timeout_seconds": os.getenv("CODEX_EXEC_TIMEOUT", "180"),
-                                           "sampling": "Codex transport defaults; no temperature override"},
-                     "created_at": datetime.now(timezone.utc).isoformat()}
-    if feedback_repairs:
-        from canonical_feedback import FEEDBACK_POLICY_VERSION
-        configuration["repair_policy"] = FEEDBACK_POLICY_VERSION
     if development_scenarios is not None:
-        from canonical_feedback import SCENARIO_POLICY_VERSION
-        configuration.update(repair_policy=SCENARIO_POLICY_VERSION,
-            feedback_mode="solver_and_development_scenarios",
-            development_scenarios="development_suite.json",
-            scenario_count=len(development_scenarios["scenarios"]))
+        write_json(directory / "development_suite.json", development_scenarios)
+    offline = tlr is not None or sysml_text is not None
+    from canonical_feedback import FEEDBACK_POLICY_VERSION
+    configuration = {"schema": "canonical_execution/2", "workflow_policy": "direct_tlr_feedback/1",
+        "condition": condition, "model": model,
+        "generation_mode": "supplied_artifact" if offline else "LLM", "generation_attempts": 0,
+        "semantic_repairs": 0, "repair_attempts": 0, "diagnosis_calls": 0,
+        "feedback_repair_budget": feedback_repairs, "abstention_repair_budget": 0,
+        "deprecated_abstention_budget": abstention_repairs,
+        "format_repair_budget": format_repairs, "format_repair_calls": 0,
+        "max_format_repair_calls": format_repairs if not offline and condition != "A" else 0,
+        "max_model_transport_invocations": int(not offline) + (format_repairs if not offline and condition != "A" else 0) + feedback_repairs,
+        "feedback_mode": ("solver" if condition == "C" else "source") if feedback_repairs else "none",
+        "repair_policy": FEEDBACK_POLICY_VERSION, "source_review_required": False,
+        "source_review_mode": "embedded_in_feedback", "source_review_calls": 0, "source_review_reuses": 0,
+        "inventory_calls": 0, "obligation_inventory_required": False,
+        "profile": PROFILE, "compile_enabled": compile_model, "solver": solver,
+        "static_max_variables": STATIC_MAX_VARIABLES, "abstraction_policy": POLICY,
+        "solver_timeout_seconds": timeout_seconds, "fixed_context": context is not None,
+        "generated_context_repair": "Source-grounded changes recorded in the same feedback proposal; no independent approval implied.",
+        "provider_settings": {"reasoning_effort": os.getenv("CODEX_REASONING_EFFORT", "low"),
+            "timeout_seconds": os.getenv("CODEX_EXEC_TIMEOUT", "180"),
+            "sampling": "Codex transport defaults; no temperature override"},
+        "created_at": datetime.now(timezone.utc).isoformat()}
     write_json(directory / "configuration.json", configuration)
-    result = {"schema": "canonical_run/1", "condition": condition, "output_dir": str(directory.resolve()),
-              "status": "failed", "tlr": None, "analysis": {"status": "not_run"},
-              "compilation": {"status": "not_run"}, "admission": "not_assessed", "source_fidelity": "unassessed",
-              "configuration": configuration, "errors": []}
+    result = {"schema": "canonical_run/1", "condition": condition, "status": "failed",
+        "output_dir": str(directory.resolve()), "configuration": configuration, "errors": [],
+        "tlr": None, "model_file": None, "admission": "not_assessed",
+        "analysis": {"status": "not_run"}, "compilation": {"status": "not_run"},
+        "source_fidelity": "not_assessed"}
     started = time.monotonic()
+    ask = generator or _ask
     try:
         prompt = _prompt(sources, context, name)
-        ask = generator or _ask
         normalized = None
         if condition == "A":
+            configuration["generation_attempts"] = int(sysml_text is None)
             candidate = sysml_text if sysml_text is not None else ask(SYSML_INSTRUCTIONS, prompt, model, directory, "generation")
             candidate = _strip_fence(candidate)
             if not candidate:
@@ -586,48 +548,43 @@ def run_candidate(sources, output_dir, condition="C", model=None, name="Requirem
         else:
             from canonical_tlr import render_sysml
             if tlr is None:
-                response = ask(TLR_INSTRUCTIONS, prompt, model, directory, "generation")
-                (directory / "generation_response.txt").write_text(response, encoding="utf-8")
-                (directory / "candidate_tlr.json").write_text(_strip_fence(response), encoding="utf-8")
-                tlr = read_json(directory / "candidate_tlr.json")
+                normalized = _generate_initial_tlr(sources, context, directory, TLR_INSTRUCTIONS,
+                    prompt, model, ask, format_repairs, configuration)
             else:
                 write_json(directory / "candidate_tlr.json", tlr)
-            normalized = _normalize_candidate(tlr, sources, context, not offline)
+                normalized = _normalize_candidate(tlr, sources, context, False)
             candidate = render_sysml(normalized, name)
-        result.update(_materialize_candidate(directory, candidate, normalized, condition, compile_model, solver, timeout_seconds))
+        result.update(_materialize_candidate(directory, candidate, normalized, condition,
+            compile_model, solver, timeout_seconds))
         if normalized is not None and feedback_repairs:
             selected, ledger = _refine_with_feedback(deepcopy(result), sources, context, directory,
                 feedback_repairs, ask, model, name, condition, compile_model, solver, timeout_seconds,
                 development_scenarios=development_scenarios)
-            for key in ("tlr", "representation", "model_file", "candidate_content", "compilation", "analysis", "admission"):
+            for key in ("source_fidelity", "tlr", "representation", "model_file", "candidate_content", "compilation", "analysis", "admission"):
                 result[key] = selected[key]
             result["feedback_repair"] = ledger
             configuration.update(semantic_repairs=ledger["accepted_repairs"], repair_attempts=ledger["repair_attempts"],
                                  repair_stop_reason=ledger["stop_reason"])
-        elif normalized is not None:
-            selected, ledger = _recover_abstentions(deepcopy(result), sources, context, directory,
-                abstention_repairs, ask, model, name, condition, compile_model, solver, timeout_seconds)
-            # Only candidate fields are replaced; top-level execution metadata survives.
-            for key in ("tlr", "representation", "model_file", "candidate_content", "compilation", "analysis", "admission"):
-                result[key] = selected[key]
-            result["repair"] = ledger
-            configuration.update(semantic_repairs=ledger["accepted_repairs"],
-                                 diagnosis_calls=ledger["diagnosis_calls"], repair_attempts=ledger["repair_attempts"],
-                                 repair_stop_reason=ledger["stop_reason"])
         result["status"] = "completed"
         if condition == "BC":
             result["arm_views"] = {
-                "B": {"model_file": "model.sysml", "tlr_file": "tlr.json", "solver_checks": "not_run", "admission": "not_assessed"},
-                "C": {"model_file": "model.sysml", "tlr_file": "tlr.json", "solver_checks": "audit/audit.json", "admission": result["admission"]}}
-        result["limitations"] = ["Solver and compiler outcomes do not establish source fidelity or engineer approval.",
-                                 "Only the declared static expression profile is executable; unsupported clauses remain visible.",
-                                 ("No independent SysML read-back is performed; feedback revisions remain LLM-reviewed."
-                                  if feedback_repairs else "No independent SysML read-back or solver-feedback correction is performed."),
-                                 "Abstention recovery is LLM-reviewed and budgeted; increased coverage does not establish fidelity."]
+                "B": {"model_file": result.get("model_file"), "tlr_file": "tlr.json", "solver_checks": "not_run", "admission": "not_assessed"},
+                "C": {"model_file": result.get("model_file"), "tlr_file": "tlr.json", "solver_checks": "audit/audit.json", "admission": result["admission"]}}
+        result["limitations"] = [
+            "Supported rules are draft interpretations. Solver/compiler success is not source fidelity or engineer approval.",
+            "Source review is embedded in budgeted feedback; no mandatory separate inventory or eligibility gate runs.",
+            "The source packet and supplied fixed context stay unchanged; generated interpretations may be revised with source-grounded reasons.",
+            "Only the declared static profile is executable. Unsupported/unresolved source rows remain explicit.",
+            "No independent SysML read-back or final-judge feedback is performed during conversion."]
     except Exception as exc:
         result["errors"].append(f"{type(exc).__name__}: {exc}")
         result["admission"] = "withheld"
+    configuration["model_transport_invocations"] = (configuration["generation_attempts"] +
+        configuration["format_repair_calls"] + configuration["repair_attempts"])
     result["latency_seconds"] = time.monotonic() - started
+    from canonical_assurance import conversion_assurance
+    result["assurance"] = conversion_assurance(result, sources)
+    write_json(directory / "assurance.json", result["assurance"])
     write_json(directory / "configuration.json", configuration)
     write_json(directory / "result.json", result)
     return result
@@ -644,14 +601,14 @@ def _study_report(directory, rows):
         r[arm].get("candidate_content", {}).get("status") == "no_executable_requirement_content"
         for r in rows for arm in ("A", "BC"))
     summary["BC_representations"] = [r["BC"].get("representation") for r in rows]
-    summary["BC_recovery"] = [r["BC"].get("repair") for r in rows]
+    summary["BC_recovery"] = [r["BC"].get("feedback_repair") for r in rows]
     summary["accepted_repair_attempts"] = sum(r["BC"]["configuration"]["semantic_repairs"] for r in rows)
     summary["repair_attempts"] = sum(r["BC"]["configuration"]["repair_attempts"] for r in rows)
     summary["diagnosis_calls"] = sum(r["BC"]["configuration"]["diagnosis_calls"] for r in rows)
     payload = {"schema": "canonical_study/1", "status": "completed", "rows": rows, "summary": summary,
                "limitations": ["A/B compares generation routes; B/C holds candidate content fixed and varies audits.",
                    "Repeated outputs are not independent source requirements.",
-                   "Optional B/C abstention recovery is recorded separately; independent preservation checking and human approval are not included."]}
+                   "Conversion uses a single bounded feedback controller; independent preservation checking and human approval are not included."]}
     write_json(directory / "study.json", payload)
     lines = ["# A/B/C study", "", "B and C reference the same candidate. C adds diagnostics and admission only.", "",
              "| Repetition | A execution | A compilation | B/C execution | B/C compilation | C admission |",
@@ -671,49 +628,48 @@ def _study_report(directory, rows):
 
 
 def run_study(sources, output_dir, repetitions=5, model=None, context=None, tlr=None, a_sysml=None,
-              compile_model=True, solver="z3", timeout_seconds=10.0, generator=None, abstention_repairs=0, feedback_repairs=0,
-              development_scenarios=None):
-    _repair_budget(abstention_repairs)
-    _repair_budget(feedback_repairs, "Feedback repair budget")
+              compile_model=True, solver="z3", timeout_seconds=10.0, generator=None,
+              abstention_repairs=0, feedback_repairs=0, development_scenarios=None,
+              format_repairs=0, **retired_options):
+    _check_retired_options(retired_options)
+    feedback_repairs = _feedback_budget(feedback_repairs, abstention_repairs)
+    _recovery_budget(format_repairs, "Initial format correction budget")
+    if type(repetitions) is not int or not 1 <= repetitions <= 50:
+        raise ValueError("Repetitions must be from 1 to 50")
     if development_scenarios is not None and not feedback_repairs:
         raise ValueError("Development scenarios require positive feedback repairs in the C branch")
     if feedback_repairs:
-        if abstention_repairs:
-            raise ValueError("Choose either abstention recovery or semantic feedback repair, not both")
         from canonical_feedback_study import run_feedback_study
         return run_feedback_study(sources, output_dir, repetitions=repetitions, model=model, context=context,
             tlr=tlr, a_sysml=a_sysml, compile_model=compile_model, solver=solver, timeout_seconds=timeout_seconds,
-            generator=generator, feedback_repairs=feedback_repairs, development_scenarios=development_scenarios)
-    if type(repetitions) is not int or not 1 <= repetitions <= 50:
-        raise ValueError("Repetitions must be from 1 to 50")
-    context = _fixed_context(context)
+            generator=generator, feedback_repairs=feedback_repairs, development_scenarios=development_scenarios,
+            format_repairs=format_repairs)
+    context, model = _fixed_context(context), _model(model)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=False)
     write_json(directory / "sources.json", sources)
+    config = {"workflow_policy": "direct_tlr_feedback/1", "model": model, "repetitions": repetitions,
+        "context": context, "conditions": ["A", "B", "C"], "shared_BC_candidate": True,
+        "feedback_repair_budget": 0, "abstention_repair_budget": 0, "format_repair_budget": format_repairs,
+        "source_review_required": False, "source_review_mode": "embedded_in_feedback",
+        "obligation_inventory_required": False, "profile": PROFILE, "abstraction_policy": POLICY,
+        "static_max_variables": STATIC_MAX_VARIABLES,
+        "planned_generation_calls": repetitions * (int(a_sysml is None) + int(tlr is None)),
+        "max_model_transport_invocations": repetitions * (int(a_sysml is None) + int(tlr is None) * (1 + format_repairs))}
+    write_json(directory / "study_configuration.json", config)
     rows = []
-    model = _model(model)
-    write_json(directory / "study_configuration.json", {"model": model, "repetitions": repetitions, "context": context,
-        "conditions": ["A", "B", "C"], "shared_BC_candidate": True, "abstention_repair_budget": abstention_repairs,
-        "repair_policy": RECOVERY_POLICY_VERSION, "semantic_repairs": 0,
-        "semantic_repairs_scope": "Accepted structured recovery proposals; final actual counts are recorded after execution.",
-        "max_additional_transport_invocations": 2 * repetitions * abstention_repairs,
-        "planned_generation_calls": repetitions * ((a_sysml is None) + (tlr is None)),
-        "order": "Alternate A then BC / BC then A across repetitions", "profile": PROFILE,
-        "abstraction_policy": POLICY})
     for rep in range(1, repetitions + 1):
         row = {"repetition": rep}
         for arm in (("A", "BC") if rep % 2 else ("BC", "A")):
             print(f"Study repetition {rep}/{repetitions}: {arm}", file=sys.stderr)
-            row[arm] = run_candidate(sources, directory / f"rep-{rep:03d}" / arm, arm, model=model, context=context,
-                tlr=deepcopy(tlr) if arm == "BC" else None, sysml_text=a_sysml if arm == "A" else None,
-                compile_model=compile_model, solver=solver, timeout_seconds=timeout_seconds, generator=generator,
-                abstention_repairs=abstention_repairs if arm == "BC" else 0)
+            row[arm] = run_candidate(sources, directory / f"rep-{rep:03d}" / arm, arm,
+                model=model, context=context, tlr=deepcopy(tlr) if arm == "BC" else None,
+                sysml_text=a_sysml if arm == "A" else None, compile_model=compile_model,
+                solver=solver, timeout_seconds=timeout_seconds, generator=generator, format_repairs=format_repairs)
         rows.append(row)
         write_json(directory / "progress.json", {"completed_repetitions": len(rows), "planned": repetitions})
     report = _study_report(directory, rows)
-    config = read_json(directory / "study_configuration.json")
-    config.update(semantic_repairs=report["summary"]["accepted_repair_attempts"],
-                  diagnosis_calls=report["summary"]["diagnosis_calls"], repair_attempts=report["summary"]["repair_attempts"])
+    config["actual_model_transport_invocations"] = sum(row[a]["configuration"]["model_transport_invocations"] for row in rows for a in ("A", "BC"))
     write_json(directory / "study_configuration.json", config)
     return report
 
@@ -728,16 +684,18 @@ def argument_parser():
         sub.add_argument("--output-dir", type=Path, help="New directory for plain artifacts; existing results are never overwritten")
         sub.add_argument("--model", help="Generation model; default from the existing Codex configuration")
         sub.add_argument("--context-file", type=Path, help="Optional fixed variables/background JSON with symbol_meanings for generation and comparison")
-        sub.add_argument("--tlr-file", type=Path, help="Use a supplied executable TLR without a generation call")
+        sub.add_argument("--tlr-file", type=Path, help="Use a supplied TLR without inference when the feedback budget is zero")
         sub.add_argument("--skip-compile", action="store_true", help="Explicitly omit compiler checking; C cannot admit the result")
         sub.add_argument("--abstention-repairs", type=int, choices=range(6), default=None if command == "run" else 0,
-                         help="Bounded TLR recovery attempts (0..5), up to twice as many extra model calls. Run defaults to 2 for generated B/C; studies and supplied fixtures default to 0.")
-        sub.add_argument("--feedback-repairs", type=int, choices=range(6), default=0,
-                         help="Matched semantic review rounds: B uses source, C adds Z3 evidence. Studies fork one initial TLR into separate B/C candidates. Cannot combine with abstention recovery.")
+                         help="Deprecated alias for --feedback-repairs; invokes the same source/solver feedback controller.")
+        sub.add_argument("--feedback-repairs", type=int, choices=range(6), default=None if command == "run" else 0,
+                         help="Bounded candidate correction: B uses source feedback, C adds Z3 evidence. Generated standalone B/C default to 2 when neither repair option is supplied; studies, supplied artifacts and A/BC default to 0. Explicit 0 disables repair.")
         sub.add_argument("--development-scenarios", type=Path,
                          help="Source-grounded development_scenarios/1 JSON for C feedback and regression gating. Requires positive --feedback-repairs; never supply final evaluation answers.")
         sub.add_argument("--solver", default="z3")
         sub.add_argument("--timeout-seconds", type=float, default=10)
+        sub.add_argument("--format-repairs", type=int, choices=(0, 1), default=0,
+                         help="One optional initial generated TLR JSON/schema correction; default 0. Separate from semantic repair; supplied candidates are not rewritten.")
         if command == "run":
             sub.add_argument("--condition", choices=("A", "B", "C", "BC"), default="C")
             sub.add_argument("--name", default="RequirementsModel")
@@ -759,12 +717,16 @@ def main(argv=None):
         sources = sources_from_file(args.statement, args.format)
         context = read_json(args.context_file) if args.context_file else None
         tlr = read_json(args.tlr_file) if args.tlr_file else None
+        feedback_repairs = args.feedback_repairs
+        if feedback_repairs is None:
+            feedback_repairs = (2 if args.command == "run" and args.condition in {"B", "C"}
+                                and tlr is None and args.abstention_repairs is None else 0)
         output = args.output_dir or ROOT / "out" / ("canonical_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"))
         common = {"model": args.model, "context": context, "tlr": tlr, "compile_model": not args.skip_compile,
-                  "solver": args.solver, "timeout_seconds": args.timeout_seconds, "feedback_repairs": args.feedback_repairs,
+                  "format_repairs": args.format_repairs,
+                  "solver": args.solver, "timeout_seconds": args.timeout_seconds, "feedback_repairs": feedback_repairs,
                   "development_scenarios": read_json(args.development_scenarios) if args.development_scenarios else None,
-                  "abstention_repairs": (args.abstention_repairs if args.abstention_repairs is not None else
-                      (2 if args.command == "run" and args.condition != "A" and tlr is None and not args.feedback_repairs else 0))}
+                  "abstention_repairs": args.abstention_repairs if args.abstention_repairs is not None else 0}
         if args.command == "study":
             result = run_study(sources, output, args.repetitions,
                 a_sysml=args.a_sysml_file.read_text(encoding="utf-8") if args.a_sysml_file else None, **common)

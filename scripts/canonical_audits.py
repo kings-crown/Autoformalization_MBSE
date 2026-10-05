@@ -36,8 +36,47 @@ def _skip(status: str, reason: str, requirement_ids: list[str]) -> dict:
     return {"status": status, "reason": reason, "requirement_ids": requirement_ids}
 
 
+def _named_context(context: dict) -> tuple[str, dict[str, dict]]:
+    """Name every background assertion without placing source IDs in SMT syntax."""
+    lines = ["(set-logic QF_LIRA)", "(set-option :produce-unsat-cores true)"]
+    assertions: dict[str, dict] = {}
+    for index, variable in enumerate(context["variables"], 1):
+        symbol = "v_" + variable["name"] + "_0"
+        lines.append(f"(declare-const {symbol} {variable['type']})")
+        for bound, value in variable.get("bounds", {}).items():
+            operator = ">=" if bound == "lower" else "<="
+            name = f"domain_{index:04d}_{bound}"
+            expression = f"({operator} {symbol} {solver_core._number(value)})"
+            assertions[name] = {"kind": "domain_bound", "variable": variable["name"],
+                                "bound": bound, "value": value, "unit": variable.get("unit", "1"),
+                                "expression": expression}
+            lines.append(f"(assert (! {expression} :named {name}))")
+    for index, assumption in enumerate(context["background"], 1):
+        name = f"assumption_{index:04d}"
+        expression = solver_core.emit_formula(assumption["predicate"], context)
+        assertions[name] = {"kind": "environmental_assumption", "assumption_id": assumption["id"],
+                            "text": assumption["text"], "expression": expression}
+        lines.append(f"(assert (! {expression} :named {name}))")
+    return "\n".join(lines) + "\n", assertions
+
+
+def _core_names(stdout: str, assertions: dict[str, dict]) -> list[str]:
+    """Read only a nonempty list of assertion names actually sent to the solver."""
+    from requirements_pipeline import _parse_sexpr
+    remainder = "\n".join(line for line in stdout.splitlines() if line.strip() != "unsat")
+    forms = _parse_sexpr(remainder)
+    if len(forms) != 1 or not isinstance(forms[0], list) or not forms[0]:
+        raise ValueError("Unexpected or empty UNSAT core response.")
+    names = forms[0]
+    if any(not isinstance(name, str) or name not in assertions for name in names):
+        raise ValueError("UNSAT core contains an unknown assertion name.")
+    if len(names) != len(set(names)):
+        raise ValueError("UNSAT core repeats an assertion name.")
+    return names
+
+
 def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
-              solver: str = "z3") -> dict:
+              solver: str = "z3", *, eligible_ids=None) -> dict:
     """Audit Gamma, the full supported conjunction, and individual obligations.
 
     Every executed check preserves its exact SMT query and result. A SAT witness
@@ -57,6 +96,8 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
               "scope": "Static encoded requirements under declared variable domains and explicit environmental assumptions.",
               "limitations": ["Solver results do not establish source fidelity or stakeholder intent.",
                               "A violating valuation is not a counterexample to an independently supplied design.",
+                              "An UNSAT core is a sufficient conflicting subset of encoded assertions, not necessarily minimal; it does not identify a wrong source.",
+                              "Opposing guarded obligations may be globally consistent by excluding their trigger; trigger findings are scenario-specific.",
                               "Admission does not establish compiler acceptance or engineer approval."]}
     try:
         if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
@@ -70,12 +111,33 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
         result["representation"] = representation_summary(normalized)
         _write(directory / "tlr.json", normalized)
         rows = normalized["requirements"]
-        supported = [row for row in rows if row["status"] == "supported"]
+        candidate_supported = [row for row in rows if row["status"] == "supported"]
+        allowed = {row["id"] for row in candidate_supported} if eligible_ids is None else set(eligible_ids)
+        if not allowed <= {row["id"] for row in candidate_supported}:
+            raise ValueError("Eligible rule IDs must identify supported source records")
+        supported = [row for row in candidate_supported if row["id"] in allowed]
         source_ids = [row["id"] for row in rows]
         supported_ids = [row["id"] for row in supported]
         result.update(requirement_ids=source_ids, supported_requirement_ids=supported_ids,
                       unsupported_requirement_ids=[row["id"] for row in rows if row["status"] != "supported"],
                       assumption_ids=[row["id"] for row in normalized["assumptions"]])
+        if eligible_ids is not None:
+            result.update(
+                source_review_required=True,
+                candidate_supported_requirement_ids=[row["id"] for row in candidate_supported],
+                withheld_requirement_ids=[row["id"] for row in rows if row["id"] not in allowed],
+                scope=("Complete source-reviewed requirement set" if len(supported) == len(rows)
+                       else "Partial source-reviewed subset; no conclusion about withheld source obligations."))
+            if not supported:
+                reason = "No rule passed source review; no requirements queries or background-only success are emitted."
+                result.update(status="not_run", background_status="not_run", consistency_status="not_run",
+                              background=_skip("not_run", reason, []),
+                              consistency=_skip("not_run", reason, source_ids))
+                for row in rows:
+                    result["requirements"].append({"id": row["id"], "status": row["status"],
+                        "checks": {name: _skip("blocked", reason, [row["id"]]) for name in CHECK_NAMES}})
+                _write(directory / "audit.json", result)
+                return result
         # No executable formula exists in a context with no variables. Do not
         # introduce a dummy symbol, or treat an empty conjunction as coverage.
         if not normalized["variables"]:
@@ -95,7 +157,47 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
         version = solver_core._version(solver, timeout_seconds)
         formulas = {row["id"]: solver_core.emit_formula(row["formula"], context) for row in supported}
 
-        def run(label: str, goal: str | None, requirement_ids: list[str], purpose: str) -> dict:
+        def localize(label: str, requirement_ids: list[str], scenario: dict | None = None) -> dict:
+            query, assertions = _named_context(context)
+            for index, rid in enumerate(requirement_ids, 1):
+                name = f"requirement_{index:04d}"
+                assertions[name] = {"kind": "requirement", "requirement_id": rid,
+                                    "expression": formulas[rid]}
+                query += f"(assert (! {formulas[rid]} :named {name}))\n"
+            if scenario is not None:
+                assertions["scenario_0001"] = {"kind": "scenario", **scenario}
+                query += f"(assert (! {scenario['expression']} :named scenario_0001))\n"
+            query += "(check-sat)\n(get-unsat-core)\n"
+            core = solver_core._execute(query, solver, timeout_seconds, version)
+            core.pop("query_sha256", None)
+            core["solver_status"] = core.pop("status")
+            core.update(status="unavailable", requirement_ids=[], assumption_ids=[], domain_bounds=[],
+                        scenario_assumptions=[], named_assertions=assertions, assertion_names=[],
+                        minimality="not_minimized",
+                        interpretation=("A sufficient conflicting subset of encoded assertions; not necessarily minimal. "
+                                        "No member is thereby identified as an incorrect source requirement or assumption."),
+                        artifacts={"query": label + "_core.smt2", "result": label + "_core.json"})
+            if core["solver_status"] == "unsat":
+                try:
+                    selected = _core_names(core["stdout"], assertions)
+                    # Keep source/document order, independent of solver core ordering.
+                    entries = [value for name, value in assertions.items() if name in selected]
+                    core.update(status="available", assertion_names=selected,
+                                requirement_ids=[entry["requirement_id"] for entry in entries if entry["kind"] == "requirement"],
+                                assumption_ids=[entry["assumption_id"] for entry in entries if entry["kind"] == "environmental_assumption"],
+                                domain_bounds=[entry for entry in entries if entry["kind"] == "domain_bound"],
+                                scenario_assumptions=[entry for entry in entries if entry["kind"] == "scenario"])
+                except (ValueError, TypeError, IndexError, KeyError) as exc:
+                    core.update(status="parse_error", diagnostic=str(exc))
+            else:
+                core.setdefault("diagnostic", "The localization query did not return UNSAT; the original consistency verdict is retained.")
+            with (directory / core["artifacts"]["query"]).open("x", encoding="utf-8") as handle:
+                handle.write(query)
+            _write(directory / core["artifacts"]["result"], core)
+            return core
+
+        def run(label: str, goal: str | None, requirement_ids: list[str], purpose: str,
+                *, core_requirements: list[str] | None = None, scenario: dict | None = None) -> dict:
             query = base + (f"(assert {goal})\n" if goal is not None else "") + "(check-sat)\n"
             evidence = solver_core._execute(query, solver, timeout_seconds, version)
             evidence.pop("query_sha256", None)
@@ -124,30 +226,44 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
                 _write(directory / (label + "_witness.json"), witness)
                 evidence["witness_evidence"] = witness
                 evidence["witness_kind"] = "Static valuation under the query; no design behavior is asserted."
+            elif evidence["status"] == "unsat" and core_requirements is not None:
+                evidence["unsat_core"] = localize(label, core_requirements, scenario)
             _write(directory / (label + ".json"), evidence)
             if evidence["status"] in INCONCLUSIVE:
                 result["inconclusive_checks"].append({"check": label, "status": evidence["status"],
                                                      "requirement_ids": requirement_ids})
             return evidence
 
-        def finding(code: str, ids: list[str], explanation: str) -> None:
-            result["findings"].append({"code": code, "requirement_ids": ids, "explanation": explanation})
+        def finding(code: str, ids: list[str], explanation: str, **details) -> None:
+            result["findings"].append({"code": code, "requirement_ids": ids, "explanation": explanation, **details})
 
-        background = run("background", None, [], "Feasibility of declared domains and environmental assumptions (Gamma).")
+        background = run("background", None, [], "Feasibility of declared domains and environmental assumptions (Gamma).",
+                         core_requirements=[])
         result.update(background=background, background_status=background["status"])
         background_ok = background["status"] == "sat"
         if background["status"] == "unsat":
-            finding("inconsistent_background", [], "The declared domains and assumptions conflict before requirements are added.")
+            core = background["unsat_core"]
+            finding("inconsistent_background", [], "The declared domains and assumptions conflict before requirements are added.",
+                    localization_status=core["status"], assumption_ids=core["assumption_ids"],
+                    domain_bounds=core["domain_bounds"], evidence_artifacts=core["artifacts"])
         if not background_ok:
             consistency = _skip("blocked", "Background feasibility has not been established.", supported_ids)
         elif not supported:
             consistency = _skip("unsupported", "No supported source requirement can be checked.", source_ids)
         else:
             consistency = run("consistency", _and(list(formulas.values())), supported_ids,
-                              "Joint consistency of Gamma and every supported source requirement (M).")
+                              "Joint consistency of Gamma and the declared eligible requirement set (M).",
+                              core_requirements=supported_ids)
             if consistency["status"] == "unsat":
-                finding("inconsistent_requirements", supported_ids,
-                        "The supported requirements conflict under the feasible background; this does not identify which source is wrong.")
+                core = consistency["unsat_core"]
+                localized = core["status"] == "available"
+                finding("inconsistent_requirements", core["requirement_ids"] if localized else supported_ids,
+                        ("The listed requirements participate in a sufficient encoded conflict under the feasible background. "
+                         "The core is not necessarily minimal and does not identify which source is wrong." if localized else
+                         "The eligible encoded requirements conflict, but localization is unavailable. Listed IDs are the full checked set, not a localized conflict."),
+                        localization_status=core["status"], checked_requirement_ids=supported_ids,
+                        assumption_ids=core["assumption_ids"], domain_bounds=core["domain_bounds"],
+                        evidence_artifacts=core["artifacts"], minimality="not_minimized")
         result.update(consistency=consistency, consistency_status=consistency["status"])
         model_ok = consistency["status"] == "sat"
 
@@ -158,6 +274,10 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
             result["requirements"].append(entry)
             if row["status"] != "supported":
                 checks.update({key: _skip("unsupported", row.get("reason", "The source meaning is not executable in this profile."), [rid])
+                               for key in CHECK_NAMES})
+                continue
+            if rid not in allowed:
+                checks.update({key: _skip("blocked", "The proposed rule did not pass source review.", [rid])
                                for key in CHECK_NAMES})
                 continue
             if not background_ok:
@@ -175,9 +295,16 @@ def audit_tlr(tlr: dict, output_dir: str | Path, timeout_seconds: float = 10,
                     finding("unreachable_trigger", [rid], "The trigger is impossible under the declared domains and environmental assumptions.")
                 if model_ok:
                     checks["in_model_trigger"] = run(prefix + "_in_model_trigger", _and([*formulas.values(), p]), supported_ids,
-                                                     "Can the trigger occur while the complete supported specification holds?")
+                                                     "Can the trigger occur while the declared eligible specification holds?",
+                                                     core_requirements=supported_ids,
+                                                     scenario={"requirement_id": rid, "expression": p,
+                                                               "meaning": "The queried conditional trigger is active; this is not a global environmental assumption."})
                     if checks["in_model_trigger"]["status"] == "unsat":
-                        finding("trigger_excluded_by_specification", [rid], "The otherwise feasible specification excludes this conditional trigger.")
+                        core = checks["in_model_trigger"]["unsat_core"]
+                        finding("trigger_excluded_by_specification", [rid],
+                                "The otherwise feasible specification excludes this conditional trigger. This is a scenario-specific conflict, not global inconsistency.",
+                                conflicting_requirement_ids=core["requirement_ids"], localization_status=core["status"],
+                                evidence_artifacts=core["artifacts"], minimality="not_minimized")
                 else:
                     checks["in_model_trigger"] = _skip("blocked", "The full supported specification is not established SAT.", [rid])
                 violation = _and([p, f"(not {q})"])
