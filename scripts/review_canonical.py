@@ -31,7 +31,8 @@ STAGES = [('extraction', 'Read requirements and context'), ('interpretation', 'B
           ('refinement', 'Review proposed corrections'), ('scenarios', 'Check development scenarios'),
           ('compilation', 'Compile model')]
 COPY_FIELDS = ('tlr', 'representation', 'analysis', 'compilation', 'candidate_content', 'admission',
-               'configuration', 'feedback_repair', 'repair', 'errors', 'limitations', 'source_fidelity')
+               'configuration', 'feedback_repair', 'repair', 'errors', 'limitations', 'source_fidelity',
+               'source_review', 'assurance', 'obligation_preparation', 'obligation_inventory')
 
 
 def now():
@@ -70,9 +71,12 @@ class CanonicalRunInput(BaseModel):
     format: Literal['text', 'csv', 'json'] = 'text'
     condition: Literal['A', 'B', 'C', 'BC'] = 'C'
     model: str | None = Field(default=None, max_length=200)
+    source_review_model: str | None = Field(default=None, max_length=200)
     feedback_repairs: int = Field(default=0, ge=0, le=5, strict=True)
     abstention_repairs: int = Field(default=0, ge=0, le=5, strict=True)
+    format_repairs: int = Field(default=0, ge=0, le=1, strict=True)
     context: dict | None = None
+    obligation_inventory: dict | None = None
     development_scenarios: dict | None = None
     tlr: dict | None = None
     sysml_text: str | None = Field(default=None, max_length=2000000)
@@ -208,21 +212,23 @@ def _validate(payload: CanonicalRunInput, store: CanonicalRunStore):
     serialized = json.dumps(payload.model_dump(), ensure_ascii=False, allow_nan=False).encode('utf-8')
     if len(serialized) > 4_000_000:
         raise ValueError('The complete source and auxiliary request exceeds 4,000,000 bytes.')
-    if not payload.name.strip() or payload.model is not None and not payload.model.strip():
+    if (not payload.name.strip() or payload.model is not None and not payload.model.strip()
+            or payload.source_review_model is not None and not payload.source_review_model.strip()):
         raise ValueError('Model name and any selected generation model must be nonempty.')
     if payload.feedback_repairs and payload.abstention_repairs:
-        raise ValueError('Choose either abstention recovery or semantic feedback repair, not both.')
-    if payload.feedback_repairs and payload.condition not in {'B', 'C'}:
+        raise ValueError('abstention_repairs is a deprecated alias for feedback_repairs; supply only one budget.')
+    feedback_repairs = payload.feedback_repairs or payload.abstention_repairs
+    if feedback_repairs and payload.condition not in {'B', 'C'}:
         raise ValueError('Feedback repair requires a separate B or C candidate.')
-    if payload.abstention_repairs and payload.condition == 'A':
-        raise ValueError('Abstention recovery applies only to structured TLR candidates.')
+    if payload.source_review_model is not None or payload.obligation_inventory is not None:
+        raise ValueError('Separate source-review models and obligation inventories are historical options; new runs use source-grounded feedback without an eligibility gate.')
     if payload.tlr is not None and payload.condition == 'A':
         raise ValueError('Condition A accepts a supplied SysML candidate, not TLR.')
     if payload.sysml_text is not None and payload.condition != 'A':
         raise ValueError('A supplied SysML candidate requires condition A.')
     if payload.sysml_text is not None and not payload.sysml_text.strip():
         raise ValueError('Supplied SysML must be nonempty.')
-    if payload.development_scenarios is not None and (payload.condition != 'C' or not payload.feedback_repairs):
+    if payload.development_scenarios is not None and (payload.condition != 'C' or not feedback_repairs):
         raise ValueError('Development scenarios require condition C and a positive feedback repair budget.')
     if payload.parent_run_id:
         parent = store.get(payload.parent_run_id)
@@ -264,8 +270,11 @@ def create_run(store, payload):
             write_json(directory / 'context.json', context)
         if suite is not None:
             write_json(directory / 'development_suite.json', suite)
-        config = {key: deepcopy(request[key]) for key in ('condition', 'model', 'feedback_repairs', 'abstention_repairs')}
+        config = {key: deepcopy(request[key]) for key in ('condition', 'model', 'format_repairs')}
         config.update(model=canonical._model(payload.model), compile_model=True, solver='z3', timeout_seconds=10,
+            feedback_repairs=payload.feedback_repairs or payload.abstention_repairs,
+            deprecated_abstention_alias_used=bool(payload.abstention_repairs),
+            source_review_required=False, obligation_inventory_required=False,
             supplied_tlr=tlr is not None, supplied_sysml=payload.sysml_text is not None,
             fixed_context=context is not None, development_scenarios=suite is not None,
             budget_policy='Explicit GUI budgets; the same values are passed to the canonical CLI core.')
@@ -279,6 +288,7 @@ def create_run(store, payload):
             'development_scenarios': deepcopy(suite), 'sources': sources, 'requirements': sources,
             'source_packet': sources, 'canonical_result': None, 'model_text': None,
             'tlr': None, 'analysis': {'status': 'not_run'}, 'compilation': {'status': 'not_run'},
+            'source_review': {'status': 'not_run'}, 'source_fidelity': 'not_assessed',
             'admission': 'not_assessed', 'representation': None, 'configuration': config,
             'development_results': None, 'reviews': [], 'evaluations': [], 'artifacts': [], 'errors': [],
             'stages': [{'id': sid, 'label': label, 'status': 'pending', 'detail': ''} for sid, label in STAGES],
@@ -302,7 +312,9 @@ def _apply_result(store, run_id, result):
     tlr = result.get('tlr')
     if tlr is not None:
         complete = representation.get('formalization_status') == 'constraints_generated'
-        detail = f"{representation.get('constraints_generated', 0)}/{len(tlr['requirements'])} executable requirement abstractions; source fidelity remains unassessed."
+        detail = (f"{representation.get('constraints_generated', 0)}/{len(tlr['requirements'])} generated executable abstractions; "
+                  "Schema-valid supported rows are emitted as a draft. Source fidelity is unassessed; "
+                  "independent final assessment and engineer approval remain separate.")
         store.stage(run_id, 'interpretation', 'passed' if complete else 'partial', detail)
     else:
         store.stage(run_id, 'interpretation', 'not_run' if result.get('condition') == 'A' else 'failed',
@@ -327,7 +339,7 @@ def _apply_result(store, run_id, result):
                 'Compiler outcome for the selected SysML artifact; inspect diagnostics separately from logical and semantic assessment.')
 
 
-def run_job(store, run_id, generator=None):
+def run_job(store, run_id, generator=None, reviewer=None):
     store.update(run_id, status='running', execution_owner=_owner())
     directory = store.directory(run_id)
     try:
@@ -336,14 +348,14 @@ def run_job(store, run_id, generator=None):
         config = store.get(run_id)['request_configuration']
         ask = generator or canonical._ask
         def tracked(system, prompt, model, attempt_dir, call_id):
-            stage = 'interpretation' if call_id == 'generation' else 'refinement'
+            stage = 'interpretation' if call_id == 'generation' or 'format' in call_id else 'refinement'
             store.stage(run_id, stage, 'running', f'Canonical {call_id}: {attempt_dir.relative_to(directory).as_posix()}.')
             return ask(system, prompt, model, attempt_dir, call_id)
         store.stage(run_id, 'interpretation', 'running', 'Execute the canonical CLI core with the declared source packet and repair policy.')
         result = canonical.run_candidate(sources, directory / 'canonical', condition=request['condition'],
             model=config['model'], name=request['name'], context=request['context'], tlr=request['tlr'],
             sysml_text=request['sysml_text'], compile_model=True, solver=config['solver'], timeout_seconds=config['timeout_seconds'],
-            generator=tracked, abstention_repairs=request['abstention_repairs'], feedback_repairs=request['feedback_repairs'],
+            generator=tracked, feedback_repairs=config['feedback_repairs'], format_repairs=config['format_repairs'],
             development_scenarios=request['development_scenarios'])
         _apply_result(store, run_id, result)
     except Exception as exc:
@@ -357,7 +369,7 @@ def run_job(store, run_id, generator=None):
         store.update(run_id, artifacts=store.artifacts(run_id))
 
 
-def create_router(data_dir: Path, executor, *, generator=None):
+def create_router(data_dir: Path, executor, *, generator=None, reviewer=None):
     store = CanonicalRunStore(data_dir)
     store.recover_interrupted()
     router = APIRouter(prefix='/api/workflow')
@@ -369,10 +381,11 @@ def create_router(data_dir: Path, executor, *, generator=None):
         from review_sysml import compiler_capability
         model = canonical._model()
         return {'workflow': 'canonical', 'model': model, 'default_model': model,
+            'source_fidelity': 'not_assessed',
             'profile': PROFILE, 'abstraction_policy': deepcopy(POLICY),
             'conditions': ['A', 'B', 'C', 'BC'], 'default_condition': 'C',
-            'repair_policies': ['none', 'abstention', 'feedback'],
-            'default_feedback_repairs': 0, 'default_abstention_repairs': 0,
+            'repair_policies': ['none', 'feedback'],
+            'default_feedback_repairs': 2, 'default_format_repairs': 0,
             'capabilities': {'generator': {'available': bool(shutil.which('codex')), 'provider': 'codex'},
                 'solver': {'available': bool(shutil.which('z3')), 'backend': 'z3'}, 'compiler': compiler_capability()},
             'limits': {'max_requirements': 500, 'max_bytes': 512000, 'max_requirement_characters': 4000,
@@ -387,7 +400,7 @@ def create_router(data_dir: Path, executor, *, generator=None):
     def submit(payload: CanonicalRunInput):
         run = create_run(store, payload)
         try:
-            executor.submit(run_job, store, run['id'], generator)
+            executor.submit(run_job, store, run['id'], generator, reviewer)
         except Exception as exc:
             store.update(run['id'], status='failed', completed_at=now(), errors=[f'Could not start the worker: {exc}'])
             raise HTTPException(503, 'Could not start the worker; the request record was retained.') from exc

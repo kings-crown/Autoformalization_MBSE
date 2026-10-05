@@ -1,6 +1,6 @@
 # Requirements-to-SysML review workbench
 
-The main page at [http://127.0.0.1:8765](http://127.0.0.1:8765) now presents the canonical CLI workflow. It calls `canonical_cli.run_candidate` for direct or structured conversion, preserving prepared JSON source context, explicit repair/scenario settings, generated SysML, and exact check evidence. Mutation jobs operate on frozen inputs in separate evaluation records. Engineering opinions do not modify machine admission.
+The main page at [http://127.0.0.1:8765](http://127.0.0.1:8765) now presents the canonical CLI workflow. It calls `canonical_cli.run_candidate` for direct or structured conversion, preserving prepared JSON source context, explicit repair/scenario settings, generated SysML, and exact check evidence. Independent assertion judging and mutation jobs operate on frozen inputs in separate evaluation records. Engineering opinions do not modify machine admission.
 
 The [canonical GUI guide](../../docs/GUI_CANONICAL_WORKFLOW.md) describes the current interface, setup, defaults, evidence interpretation, evaluation budgets, storage, and API. Its frontend is [canonical.html](canonical.html); the service is [review_server.py](../../scripts/review_server.py). Start it from the repository root:
 
@@ -8,7 +8,7 @@ The [canonical GUI guide](../../docs/GUI_CANONICAL_WORKFLOW.md) describes the cu
 python scripts/review_server.py
 ```
 
-Canonical runs use `out/review_workbench/canonical` by default. The GUI defaults repair budgets to zero; select explicit options to match a particular CLI run. It shares conversion code, not identical storage wrappers or automatic import of standalone CLI output directories.
+Canonical runs use `out/review_workbench/canonical` by default. The GUI displays one explicit feedback budget, initially two for B/C; zero disables feedback. A and the unchanged BC route require zero. There are no mandatory inventory or separate source-review calls. The source/context goes directly to TLR generation, structural validation, shared rendering and compiler/Z3 checks; source review is embedded in configured feedback proposals. It shares conversion code, not identical storage wrappers or automatic import of standalone CLI output directories.
 
 ## Earlier workbench and design-review compatibility
 

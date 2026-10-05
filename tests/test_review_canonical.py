@@ -14,7 +14,9 @@ from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'tests'))
 import canonical_cli
+from source_review_support import pass_source_review
 from canonical_tlr import validate_tlr
 from review_canonical import create_router, safe_artifact, CanonicalRunInput, create_run
 
@@ -73,9 +75,23 @@ class TransportTests(unittest.TestCase):
         self.compiler = patch('canonical_cli._compile', side_effect=compile_ok)
         self.compiler.start()
         self.addCleanup(self.compiler.stop)
+        self.source_reviewer = patch('canonical_cli._review_ask', side_effect=pass_source_review)
+        self.source_reviewer_mock = self.source_reviewer.start()
+        self.addCleanup(self.source_reviewer.stop)
 
     def post(self, payload):
         return self.client.post('/api/workflow/runs', json=payload)
+
+    def test_historical_gate_options_rejected_before_calls_or_run_creation(self):
+        _, _, payload = fixture()
+        for options in ({'obligation_inventory': {}}, {'source_review_model': 'old-reviewer'}):
+            with self.subTest(options=options):
+                reply = self.post({**payload, **options})
+                self.assertEqual(reply.status_code, 422, reply.text)
+                self.assertIn('historical options', reply.json()['detail'])
+        self.assertEqual(self.store.all(), [])
+        self.provider.assert_not_called()
+        self.source_reviewer_mock.assert_not_called()
 
     def test_json_context_and_exact_wording_reach_same_cli_source_loader(self):
         source, tlr, payload = fixture()
@@ -93,6 +109,51 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(json.loads(stored.read_text()), [source])
         self.provider.assert_not_called()
 
+    def test_supported_draft_emits_without_source_review_or_inventory_calls(self):
+        _, _, payload = fixture()
+        payload['condition'] = 'B'
+        self.source_reviewer_mock.side_effect = AssertionError('Separate review must not run')
+        run = self.post(payload).json()
+        self.assertEqual(run['status'], 'completed', run)
+        self.assertEqual(run['source_fidelity'], 'not_assessed')
+        self.assertEqual(run['representation']['constraints_emitted'], 1)
+        self.assertTrue(run['model_text'])
+        self.assertFalse(run['request_configuration']['source_review_required'])
+        self.assertFalse(run['request_configuration']['obligation_inventory_required'])
+        self.assertEqual(run['configuration']['source_review_calls'], 0)
+        self.assertFalse({'obligations', 'source_review'} & {row['id'] for row in run['stages']})
+        stage = next(row for row in run['stages'] if row['id'] == 'interpretation')
+        self.assertIn('draft', stage['detail'])
+        self.assertIn('Source fidelity is unassessed', stage['detail'])
+        self.provider.assert_not_called()
+        self.source_reviewer_mock.assert_not_called()
+
+    def test_alias_forwards_one_feedback_budget_without_historical_options(self):
+        _, tlr, payload = fixture()
+        payload.update(condition='B', abstention_repairs=2, format_repairs=1)
+        result = {'status': 'completed', 'condition': 'B', 'tlr': tlr,
+                  'representation': {}, 'analysis': {'status': 'not_run'}}
+        with patch('canonical_cli.run_candidate', return_value=result) as execute:
+            run = self.post(payload).json()
+        self.assertEqual(run['status'], 'completed', run)
+        options = execute.call_args.kwargs
+        self.assertEqual(options['feedback_repairs'], 2)
+        self.assertEqual(options['format_repairs'], 1)
+        for removed in ('abstention_repairs', 'reviewer', 'source_review_model',
+                        'obligation_inventory', 'require_obligation_inventory'):
+            self.assertNotIn(removed, options)
+        self.assertTrue(run['request_configuration']['deprecated_abstention_alias_used'])
+        self.provider.assert_not_called()
+
+    def test_direct_baseline_does_not_claim_tlr_review(self):
+        source, _, payload = fixture()
+        payload.update(condition='A', tlr=None, sysml_text='package DirectBaseline {}')
+        run = self.post(payload).json()
+        self.assertEqual(run['status'], 'completed', run)
+        self.assertFalse(run['request_configuration']['source_review_required'])
+        self.assertNotIn('source_review', {row['id'] for row in run['stages']})
+        self.source_reviewer_mock.assert_not_called()
+
     def test_bad_combinations_and_inputs_fail_before_run_creation(self):
         _, _, baseline = fixture()
         invalid = [
@@ -108,6 +169,7 @@ class TransportTests(unittest.TestCase):
             {'text': '{"requirements":[],"requirements":[]}'},
             {'name': '   '},
             {'model': '   '},
+            {'source_review_model': '   '},
             {'unexpected': True},
         ]
         for changes in invalid:
@@ -208,7 +270,7 @@ class TransportTests(unittest.TestCase):
         nested.mkdir(parents=True)
         (nested / 'report.json').write_text('{"status":"partial"}')
         refreshed = self.client.get(f"/api/workflow/runs/{run['id']}").json()
-        artifact = next(x for x in refreshed['artifacts'] if x['path'].endswith('/report.json'))
+        artifact = next(x for x in refreshed['artifacts'] if x['path'] == 'evaluations/eval-0123456789abcdef/report/report.json')
         self.assertEqual(self.client.get(artifact['url']).json(), {'status': 'partial'})
         packet = self.client.get(f"/api/workflow/runs/{run['id']}/packet").json()
         self.assertIn(artifact['path'], packet['files'])
