@@ -194,7 +194,12 @@ def behavior_from_contracts(bundle: dict) -> dict | None:
     context = {k: v for k, v in normalized.items() if k != 'properties'} if normalized else None
     if bundle.get('context_sha256') != _hash(context):
         raise ValueError('Contract assumptions/model/scope context differs from its hash.')
-    if bundle.get('rules') != RULES or bundle.get('rule_registry') != RULE_REGISTRY:
+    registry = bundle.get('rule_registry')
+    if isinstance(registry, dict):
+        # Older bundles include descriptive metadata that does not define rules.
+        registry = {key: value for key, value in registry.items()
+                    if key not in {'provenance', 'references'}}
+    if bundle.get('rules') != RULES or registry != RULE_REGISTRY:
         raise ValueError('Contract rule registry differs from the supported version.')
     rows = bundle.get('contracts')
     if not isinstance(rows, list):

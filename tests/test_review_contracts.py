@@ -73,6 +73,26 @@ class ContractBundleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 behavior_from_contracts(item)
 
+    def test_saved_registry_metadata_preserves_rule_validation(self):
+        bundle = build_contract_bundle(sources(), 'sourcehash', proposal())
+        bundle['rule_registry'].update(provenance='Historical descriptive metadata',
+                                       references=['Archived design notes'])
+        original = deepcopy(bundle)
+        self.assertEqual(behavior_from_contracts(bundle), bundle['behavior'])
+        self.assertEqual(bundle, original)
+        for label, change in (
+            ('schema', lambda b: b['rule_registry'].update(schema='unsupported/1')),
+            ('version', lambda b: b['rule_registry'].update(version='99')),
+            ('rules', lambda b: b['rule_registry']['rules'][0].update(version='99')),
+            ('unknown field', lambda b: b['rule_registry'].update(unknown='value')),
+            ('rule mirror', lambda b: b['rules'][0].update(version='99')),
+        ):
+            with self.subTest(change=label):
+                changed = deepcopy(bundle)
+                change(changed)
+                with self.assertRaisesRegex(ValueError, 'Contract rule registry differs'):
+                    behavior_from_contracts(changed)
+
     def test_context_hash_excludes_guarantees_but_includes_dynamics_and_scope(self):
         b = proposal()
         original = build_contract_bundle(sources(), 'sourcehash', b)

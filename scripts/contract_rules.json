@@ -1,10 +1,6 @@
 {
   "schema": "review_contract_rules/1",
   "version": "1.0.0",
-  "provenance": "Original deterministic adapters informed by publicly described INSPECTA rule-book separation; no INSPECTA runtime or GUMBO syntax is imported.",
-  "references": [
-    "https://github.com/loonwerks/INSPECTA-Spec-Code-Proof-Copilot/blob/main/scp_demo_artifacts/isolette_io/Gumbo_FSE_agent_Plan.txt"
-  ],
   "rules": [
     {
       "id": "FINITE_ALWAYS",

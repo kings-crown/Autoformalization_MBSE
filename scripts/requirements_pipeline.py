@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Requirements-to-SysML command entry point and legacy generation library.
 
-The default command (also ``run``) uses the same review_workflow engine as the
-GUI: python scripts/requirements_pipeline.py --statement requirements.csv
-Select ``--engine pipeline`` for the audited Codex generation profile. The local
-constraint engine and requirements-only analysis are the shared defaults.
+The default command (also ``run``) delegates to canonical_cli, as do ``study``,
+``judge`` and ``rescore-judgments``. Structured conversion uses direct TLR
+generation, shared SysML/SMT encoders and one bounded feedback loop; the GUI
+uses these same canonical services. See docs/REPRODUCIBLE_WORKFLOW.md for the
+complete generation-to-assessment sequence and explicit execution settings.
 
 The original generator remains available through the explicit ``legacy`` command:
     python scripts/requirements_pipeline.py legacy --statement requirements.csv \
         --output-prefix out/example --sysml-output out/example.sysml
 Its optional intent formalization, provider selection, repair policy and SysML
-modes are separate from the shared review profile. Utility subcommands
+modes are separate from canonical conversion. The historical review workflow
+requires the explicit ``review`` command. Utility subcommands
 ``translate``, ``harvest`` and ``formalize_intent`` are retained.
 
 This module also supplies the existing generation and solver functions used by
@@ -1702,7 +1704,7 @@ def sanitize_qf_lia_fragment(fragment: str) -> tuple[str, List[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Semantic verification checks (AGREE-Dog-style neuro-symbolic gate)
+# Semantic verification checks
 # ---------------------------------------------------------------------------
 
 
@@ -3131,17 +3133,17 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     formalize_parser.add_argument(
         "--set-id",
-        default="AGREEDOG-PRELIM",
+        default="MBSE-INTENT",
         help="Identifier for the generated requirement set (default: %(default)s).",
     )
     formalize_parser.add_argument(
         "--title",
-        default="AGREE-Dog Preliminary Intent Formalization",
+        default="Requirements Intent Formalization",
         help="Title for the generated requirement set.",
     )
     formalize_parser.add_argument(
         "--system",
-        default="AGREE-Dog Inspired Verification Workflow",
+        default="Requirements-to-SysML Workflow",
         help="System description used in the formalization context.",
     )
     formalize_parser.add_argument(
@@ -6680,7 +6682,7 @@ def legacy_main(argv: Optional[Sequence[str]] = None) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Run the canonical research CLI; older review and generator modes are explicit."""
+    """Run canonical conversion/evaluation; older review and generator modes are explicit."""
     cli_argv = list(argv) if argv is not None else list(sys.argv[1:])
     if cli_argv and cli_argv[0] in _delegated_toolkit_commands():
         _run_toolkit_subcommand(cli_argv)
