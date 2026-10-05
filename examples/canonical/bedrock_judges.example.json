@@ -1,0 +1,25 @@
+{
+  "schema": "bedrock_judges/1",
+  "judges": [
+    {
+      "model": "REPLACE_WITH_BEDROCK_JUDGE_1_MODEL_ID",
+      "region": "us-east-1",
+      "structured_output": false,
+      "max_tokens": 4096,
+      "timeout_seconds": 120
+    },
+    {
+      "model": "REPLACE_WITH_BEDROCK_JUDGE_2_MODEL_ID",
+      "region": "us-east-1",
+      "structured_output": false,
+      "max_tokens": 4096,
+      "timeout_seconds": 120
+    }
+  ],
+  "assertion_author": {
+    "model": "REPLACE_WITH_BEDROCK_ASSERTION_AUTHOR_MODEL_ID",
+    "region": "us-east-1",
+    "max_tokens": 4096,
+    "timeout_seconds": 120
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "schema": "sysml_assertions/1",
+  "sources": [
+    {
+      "id": "BAT-001",
+      "text": "The battery voltage shall be at most 28 V.",
+      "source": {
+        "document": "Synthetic battery controller example",
+        "location": "clause 1"
+      }
+    },
+    {
+      "id": "CTRL-002",
+      "text": "When maintenance mode is active, motion shall be disabled.",
+      "source": {
+        "document": "Synthetic battery controller example",
+        "location": "clause 2"
+      }
+    },
+    {
+      "id": "BAT-003",
+      "text": "When charging is enabled, the charging current shall be at least 0.5 A.",
+      "source": {
+        "document": "Synthetic battery controller example",
+        "location": "clause 3"
+      }
+    }
+  ],
+  "requirements": [
+    {
+      "id": "BAT-001",
+      "assertions": [
+        {
+          "id": "BAT-voltage-identity",
+          "statement": "The generated constraint limits the battery voltage, rather than another electrical quantity.",
+          "category": "context",
+          "source_basis": [
+            {
+              "source_id": "BAT-001",
+              "quote": "battery voltage"
+            }
+          ]
+        },
+        {
+          "id": "BAT-inclusive-limit",
+          "statement": "The voltage upper bound is inclusive at 28 V: 28 V is allowed and values above 28 V are excluded under the supplied context.",
+          "category": "boundary",
+          "source_basis": [
+            {
+              "source_id": "BAT-001",
+              "quote": "at most 28 V"
+            }
+          ]
+        },
+        {
+          "id": "BAT-voltage-units",
+          "statement": "The numeric voltage limit denotes 28 volts, including any explicitly equivalent canonical-unit representation.",
+          "category": "unit",
+          "source_basis": [
+            {
+              "source_id": "BAT-001",
+              "quote": "28 V"
+            }
+          ]
+        },
+        {
+          "id": "ASSERT_0001_COVERAGE",
+          "statement": "The generated SysML represents every obligation, guard, exception and scope qualification of this requirement; documentation-only or unsupported placeholders do not establish executable preservation.",
+          "category": "coverage",
+          "source_basis": [
+            {
+              "source_id": "BAT-001",
+              "quote": "The battery voltage shall be at most 28 V."
+            }
+          ]
+        },
+        {
+          "id": "ASSERT_0001_ASSUMPTIONS",
+          "statement": "The generated SysML for this requirement, including applicable shared definitions, assumptions and bindings, does not impose restrictions or obligations beyond the contextualized source packet and fixed context.",
+          "category": "assumptions",
+          "source_basis": [
+            {
+              "source_id": "BAT-001",
+              "quote": "The battery voltage shall be at most 28 V."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CTRL-002",
+      "assertions": [
+        {
+          "id": "CTRL-maintenance-guard",
+          "statement": "Active maintenance mode requires motion to be disabled in the generated model.",
+          "category": "condition",
+          "source_basis": [
+            {
+              "source_id": "CTRL-002",
+              "quote": "When maintenance mode is active, motion shall be disabled."
+            }
+          ]
+        },
+        {
+          "id": "CTRL-guard-scope",
+          "statement": "This requirement does not require maintenance mode to be active, or force motion to be enabled when maintenance is inactive.",
+          "category": "modality",
+          "source_basis": [
+            {
+              "source_id": "CTRL-002",
+              "quote": "When maintenance mode is active, motion shall be disabled."
+            }
+          ]
+        },
+        {
+          "id": "ASSERT_0002_COVERAGE",
+          "statement": "The generated SysML represents every obligation, guard, exception and scope qualification of this requirement; documentation-only or unsupported placeholders do not establish executable preservation.",
+          "category": "coverage",
+          "source_basis": [
+            {
+              "source_id": "CTRL-002",
+              "quote": "When maintenance mode is active, motion shall be disabled."
+            }
+          ]
+        },
+        {
+          "id": "ASSERT_0002_ASSUMPTIONS",
+          "statement": "The generated SysML for this requirement, including applicable shared definitions, assumptions and bindings, does not impose restrictions or obligations beyond the contextualized source packet and fixed context.",
+          "category": "assumptions",
+          "source_basis": [
+            {
+              "source_id": "CTRL-002",
+              "quote": "When maintenance mode is active, motion shall be disabled."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BAT-003",
+      "assertions": [
+        {
+          "id": "BAT-charging-guard",
+          "statement": "The current lower-bound obligation is conditional on charging being enabled; charging is not made universally mandatory.",
+          "category": "condition",
+          "source_basis": [
+            {
+              "source_id": "BAT-003",
+              "quote": "When charging is enabled"
+            }
+          ]
+        },
+        {
+          "id": "BAT-inclusive-current",
+          "statement": "While charging is enabled, 0.5 A satisfies the lower bound and a charging current below 0.5 A violates it.",
+          "category": "boundary",
+          "source_basis": [
+            {
+              "source_id": "BAT-003",
+              "quote": "at least 0.5 A"
+            }
+          ]
+        },
+        {
+          "id": "BAT-current-units",
+          "statement": "The lower-bound quantity is charging current in amperes with an equivalent 0.5 A magnitude.",
+          "category": "unit",
+          "source_basis": [
+            {
+              "source_id": "BAT-003",
+              "quote": "charging current shall be at least 0.5 A"
+            }
+          ]
+        },
+        {
+          "id": "ASSERT_0003_COVERAGE",
+          "statement": "The generated SysML represents every obligation, guard, exception and scope qualification of this requirement; documentation-only or unsupported placeholders do not establish executable preservation.",
+          "category": "coverage",
+          "source_basis": [
+            {
+              "source_id": "BAT-003",
+              "quote": "When charging is enabled, the charging current shall be at least 0.5 A."
+            }
+          ]
+        },
+        {
+          "id": "ASSERT_0003_ASSUMPTIONS",
+          "statement": "The generated SysML for this requirement, including applicable shared definitions, assumptions and bindings, does not impose restrictions or obligations beyond the contextualized source packet and fixed context.",
+          "category": "assumptions",
+          "source_basis": [
+            {
+              "source_id": "BAT-003",
+              "quote": "When charging is enabled, the charging current shall be at least 0.5 A."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "fixed_context": {
+    "variables": [
+      {
+        "name": "battery_voltage",
+        "type": "Real",
+        "unit": "V",
+        "bounds": {
+          "lower": "0"
+        }
+      },
+      {
+        "name": "maintenance_mode",
+        "type": "Bool"
+      },
+      {
+        "name": "motion_enabled",
+        "type": "Bool"
+      },
+      {
+        "name": "charging_enabled",
+        "type": "Bool"
+      },
+      {
+        "name": "charging_current",
+        "type": "Real",
+        "unit": "A",
+        "bounds": {
+          "lower": "0"
+        }
+      }
+    ],
+    "background": []
+  },
+  "author": "Constructed synthetic assertion example; not a PURE reference or empirical result"
+}

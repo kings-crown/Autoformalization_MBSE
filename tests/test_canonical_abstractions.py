@@ -15,6 +15,9 @@ from canonical_cli import SYSML_INSTRUCTIONS, TLR_INSTRUCTIONS, _fixed_context, 
 from canonical_tlr import validate_tlr, render_sysml, tlr_context
 from canonical_sysml_screen import requirement_content
 from canonical_audits import audit_tlr
+from canonical_assertion_judging import AUTHOR_PROMPT, JUDGE_PROMPT, evaluate_packets
+from canonical_assertions import AUTHOR_SYSTEM, EVALUATOR_SYSTEM, build_suite
+from canonical_judging import RUBRIC
 from review_sysml import compiler_capability
 
 EXAMPLE = ROOT / 'examples/canonical/message_abstractions'
@@ -24,6 +27,9 @@ def fixture():
     return read_json(EXAMPLE / 'requirements.json'), read_json(EXAMPLE / 'tlr.json')
 
 
+from source_review_support import pass_source_review
+
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class AbstractionTests(unittest.TestCase):
     def test_declared_capability_and_occurrence_roundtrip(self):
         sources, tlr = fixture()
@@ -40,8 +46,9 @@ class AbstractionTests(unittest.TestCase):
         self.assertEqual(summary['by_kind']['event_relation'], 1)
         self.assertFalse(summary['implementation_verified'])
 
-    def test_shared_policy_reaches_every_generation_prompt(self):
-        for prompt in (SYSML_INSTRUCTIONS, TLR_INSTRUCTIONS):
+    def test_shared_policy_reaches_every_generation_and_judge_prompt(self):
+        for prompt in (SYSML_INSTRUCTIONS, TLR_INSTRUCTIONS, AUTHOR_PROMPT, JUDGE_PROMPT,
+                       AUTHOR_SYSTEM, EVALUATOR_SYSTEM, RUBRIC):
             self.assertIn(POLICY_TEXT, prompt)
             self.assertIn('support flag cannot stand for an actual recipient restriction', prompt)
 
@@ -147,6 +154,7 @@ class AbstractionTests(unittest.TestCase):
             self.assertFalse(result['representation']['implementation_verified'])
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ContentPreflightTests(unittest.TestCase):
     def test_documentation_or_strings_do_not_count(self):
         for text in ('package M { doc /* require constraint { true } */ }',
@@ -156,5 +164,23 @@ class ContentPreflightTests(unittest.TestCase):
             self.assertEqual(requirement_content(text)['require_constraint_sites'],0)
         for text in ('require constraint c { x > 0 }','require { x }','require /* comment */ constraint { x }'):
             self.assertEqual(requirement_content(text)['require_constraint_sites'],1)
+
+    def test_no_content_skips_paid_calls_and_keeps_denominators(self):
+        rows=[{'id':'R','text':'The system shall send messages in order.'}]
+        authored=[{'id':'R','assertions':[{'id':'ORDER','category':'obligation','statement':'Sending order is preserved.',
+                    'source_basis':[{'source_id':'R','quote':rows[0]['text']}]}]}]
+        suite=build_suite(rows,authored,schema="sysml_assertions/1")
+        packet={'id':'candidate','requirements':rows,'sysml':'package M { requirement R { doc /* unsupported */ } }'}
+        callbacks=[Mock(side_effect=AssertionError('must not call')) for _ in range(2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            report=evaluate_packets([packet],suite,['j1','j2'],Path(tmp)/'judges',callbacks)
+            self.assertEqual(report['summary']['planned_calls'],2)
+            self.assertEqual(report['summary']['not_run_calls'],2)
+            self.assertEqual(report['joint']['planned'],3)
+            self.assertEqual(report['joint']['unreviewed'],3)
+            self.assertEqual(report['by_category']['coverage']['unreviewed'],1)
+            self.assertEqual(report['results'][0]['content_screen']['status'],'no_executable_requirement_content')
+        for fn in callbacks: fn.assert_not_called()
+
 
 if __name__ == '__main__': unittest.main()

@@ -1,0 +1,2 @@
+# Optional transport for Bedrock-hosted assertion authors and independent judges.
+boto3>=1.35,<2

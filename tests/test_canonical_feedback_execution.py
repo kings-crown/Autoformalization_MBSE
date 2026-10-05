@@ -53,6 +53,9 @@ def compiled(*args, **kwargs):
     return {'status': 'passed', 'diagnostics': []}
 
 
+from source_review_support import pass_source_review
+
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class FeedbackExecutionTests(unittest.TestCase):
     def test_B_revises_supported_formula_without_calling_solver_and_stops_on_no_change(self):
         sources, tlr = fixture()
@@ -232,12 +235,21 @@ class FeedbackExecutionTests(unittest.TestCase):
             self.assertNotEqual(row['B']['tlr'], row['C']['tlr'])
             config = cli.read_json(path / 'study_configuration.json')
             self.assertFalse(config['shared_BC_candidate'])
+            self.assertEqual(config['max_generation_transport_invocations'], 6)
             self.assertEqual(config['max_model_transport_invocations'], 6)
-            self.assertEqual(config['actual_model_transport_invocations'], 5)
+            self.assertFalse(config['source_review_required'])
+            self.assertEqual(config['source_review_mode'], 'embedded_in_feedback')
+            self.assertEqual(config['actual_generation_transport_invocations'], 5)
+            self.assertEqual(config['actual_model_transport_invocations'], len(calls))
+            self.assertEqual(len(calls), 5)
             self.assertEqual([c[0] for c in calls].count('generation'), 2)
             self.assertEqual(result['summary']['by_condition']['B']['repair_attempts'], 1)
             self.assertEqual(result['summary']['by_condition']['C']['repair_attempts'], 2)
-
+            from canonical_judging import packets_from_study
+            packets, observations, packet_sources = packets_from_study(path)
+            self.assertEqual([o['condition'] for o in observations], ['A', 'B', 'C'])
+            self.assertNotEqual(observations[1]['packet_id'], observations[2]['packet_id'])
+            self.assertEqual(packet_sources, sources)
 
 
 if __name__ == '__main__':

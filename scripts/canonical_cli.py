@@ -703,6 +703,43 @@ def argument_parser():
         else:
             sub.add_argument("--repetitions", type=int, default=5)
             sub.add_argument("--a-sysml-file", type=Path, help="Supplied A fixture, without a generation call")
+    judge = subs.add_parser("judge", help="Independent LLM judgments; no condition metadata or solver outcomes are sent")
+    source = judge.add_mutually_exclusive_group(required=True)
+    source.add_argument("--study-dir", type=Path)
+    source.add_argument("--packets-file", type=Path, help="Explicit source/SysML packets, optionally with held-out calibration labels")
+    provider = judge.add_mutually_exclusive_group(required=True)
+    provider.add_argument("--judge-model", action="append", help="Legacy fidelity labels through Codex; supply twice")
+    provider.add_argument("--judge-config", type=Path, help="bedrock_judges/1 configuration for assertion assessment")
+    judge.add_argument("--assertions-file", type=Path, help="Frozen sysml_assertions/1, /2 or /3 suite; required for Bedrock judges")
+    judge.add_argument("--output-dir", type=Path, required=True)
+    judge.add_argument("--judge-workers", type=int, choices=(1, 2), default=1, help="Run the two Bedrock judges sequentially or concurrently; prompts and scoring stay identical")
+    judge.add_argument("--recover-leading-brace", action="store_true",
+                       help="Opt in before judging to receipt-checked removal of one surplus leading '{'; preserves raw replies and verdicts, makes no extra calls, and records recovered parses")
+    rescore = subs.add_parser("rescore-judgments", help="Revalidate saved assertion judgments offline; no model calls")
+    rescore.add_argument("--assessment-dir", type=Path, required=True, help="Saved assertion-assessment directory with frozen packets and raw responses")
+    rescore.add_argument("--output-dir", type=Path, required=True, help="New directory; original results are preserved")
+    rescore.add_argument("--recover-leading-brace", action="store_true",
+                         help="Opt-in secondary offline correction of one surplus leading '{' with matching completed provider text; never edits verdicts or original evidence")
+    repair = subs.add_parser("repair-judgments", help="Bounded evidence correction for unreviewed assertions using their original judges; freezes valid judgments and candidates")
+    repair.add_argument("--assessment-dir", type=Path, required=True,
+                        help="Saved assertion assessment, including its original frozen provider configuration")
+    repair.add_argument("--output-dir", type=Path,
+                        help="New directory preserving original results; required unless --dry-run")
+    repair.add_argument("--max-attempts", type=int, choices=(1, 2), default=2,
+                        help="Maximum follow-up calls per affected judge/requirement cell; stop at the first usable verdict")
+    repair.add_argument("--judge-workers", type=int, choices=(1, 2), default=2)
+    repair.add_argument("--continue-budget", action="store_true",
+                        help="Explicitly continue a completed correction campaign for remaining gaps, retaining history and enforcing a cumulative four-attempt cap per cell")
+    repair.add_argument("--dry-run", action="store_true",
+                        help="Validate saved inputs and print the affected-call plan without creating a provider client or making calls")
+    prepare = subs.add_parser("prepare-assertions", help="Draft a source-only assertion suite through Bedrock; no candidate is read")
+    prepared_source = prepare.add_mutually_exclusive_group(required=True)
+    prepared_source.add_argument("--statement", type=Path)
+    prepared_source.add_argument("--study-dir", type=Path, help="Read only the study's source packet and fixed context")
+    prepare.add_argument("--format", choices=("text", "csv", "json"))
+    prepare.add_argument("--context-file", type=Path, help="Fixed context for --statement; not allowed with --study-dir")
+    prepare.add_argument("--judge-config", type=Path, required=True, help="Bedrock configuration including assertion_author")
+    prepare.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -712,6 +749,84 @@ def main(argv=None):
         args_list.insert(0, "run")
     args = argument_parser().parse_args(args_list)
     try:
+        if args.command == "repair-judgments":
+            from canonical_assertion_repair import prepare_repair_plan, repair_assessment
+            if args.dry_run:
+                plan = prepare_repair_plan(args.assessment_dir, continue_budget=args.continue_budget)
+                print(json.dumps({"plan": plan, "max_attempts": args.max_attempts,
+                                  "judge_workers": args.judge_workers, "dry_run": True},
+                                 indent=2, ensure_ascii=False))
+                return 0
+            if args.output_dir is None:
+                raise ValueError("repair-judgments requires --output-dir unless --dry-run")
+            from bedrock_judging import BedrockTransport
+            configuration = read_json(args.assessment_dir / "configuration.json").get("provider")
+            if not isinstance(configuration, dict):
+                raise ValueError("Saved assessment lacks a frozen Bedrock provider configuration")
+            transport = BedrockTransport(configuration)
+            result = repair_assessment(args.assessment_dir, args.output_dir,
+                                       [transport.for_judge(i) for i in (0, 1)], transport.config,
+                                       max_attempts=args.max_attempts, workers=args.judge_workers,
+                                       continue_budget=args.continue_budget)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result["status"] == "completed" else 1
+        if args.command == "rescore-judgments":
+            from canonical_assertion_rescore import rescore_assessment
+            result = rescore_assessment(args.assessment_dir, args.output_dir,
+                                        recover_leading_brace=args.recover_leading_brace)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result["status"] == "completed" else 1
+        if args.command == "prepare-assertions":
+            from bedrock_judging import BedrockTransport
+            from canonical_assertion_judging import prepare_assertions
+            if args.study_dir:
+                if args.context_file or args.format:
+                    raise ValueError("--study-dir uses its saved source/context; omit --context-file and --format")
+                sources = read_json(args.study_dir / "sources.json")
+                context = read_json(args.study_dir / "study_configuration.json").get("context")
+            else:
+                sources = sources_from_file(args.statement, args.format)
+                context = read_json(args.context_file) if args.context_file else None
+            transport = BedrockTransport(read_json(args.judge_config))
+            callback = transport.for_assertion_author()
+            result = prepare_assertions(sources, context, transport.config["assertion_author"]["model"],
+                                        args.output_dir, callback, transport.config)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result["status"] == "completed" else 1
+        if args.command == "judge":
+            if args.judge_config:
+                from bedrock_judging import BedrockTransport
+                from canonical_assertion_judging import evaluate_packets, evaluate_study
+                if not args.assertions_file:
+                    raise ValueError("Bedrock assertion assessment requires --assertions-file; use prepare-assertions or a supplied suite")
+                suite = read_json(args.assertions_file)
+                transport = BedrockTransport(read_json(args.judge_config))
+                models = [c["model"] for c in transport.judge_configs]
+                callbacks = [transport.for_judge(i) for i in (0, 1)]
+                if args.study_dir:
+                    result = evaluate_study(args.study_dir, suite, models, args.output_dir, callbacks, transport.config,
+                        workers=args.judge_workers, recover_leading_brace=args.recover_leading_brace)
+                else:
+                    packets = read_json(args.packets_file)
+                    if not isinstance(packets, list) or not packets:
+                        raise ValueError("Supply at least one assertion assessment packet")
+                    result = evaluate_packets(packets, suite, models, args.output_dir, callbacks, transport.config,
+                        workers=args.judge_workers, recover_leading_brace=args.recover_leading_brace)
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                return 0 if result["status"] == "completed" else 1
+            from canonical_judging import judge_packets, judge_study
+            if args.recover_leading_brace:
+                raise ValueError("--recover-leading-brace requires --judge-config for receipt-checked assertion assessment")
+            if args.judge_workers != 1:
+                raise ValueError("--judge-workers requires --judge-config")
+            if args.assertions_file:
+                raise ValueError("--assertions-file requires --judge-config for Bedrock assertion assessment")
+            if len(args.judge_model) != 2:
+                raise ValueError("Supply --judge-model twice")
+            result = (judge_study(args.study_dir, args.judge_model, args.output_dir) if args.study_dir else
+                      judge_packets(read_json(args.packets_file), args.judge_model, args.output_dir))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
         if not 0 < args.timeout_seconds <= 3600:
             raise ValueError("Solver timeout must be positive and at most 3600 seconds")
         sources = sources_from_file(args.statement, args.format)
