@@ -204,9 +204,60 @@ def extract_canonical_formulas(manifest, packet, run):
         if not same_context(tlr_context(tlr), manifest["context"]):
             reason = "Comparison context differs: generated variables, domains or assumptions changed the fixed vocabulary/background"
             return formulas, {rid: reason for rid in formulas}
+        configuration = run.get("configuration") or {}
+        if not isinstance(configuration, dict):
+            raise ValueError("Source-to-rule workflow configuration must be an object")
+        inventory_required = configuration.get("obligation_inventory_required") is True
+        gate_required = (configuration.get("source_review_policy") is not None
+                         or configuration.get("source_review_required") is True or inventory_required)
+        review = run.get("source_review")
+        eligible = None
+        historical_review = review is not None and not (
+            isinstance(review, dict) and review.get("status") == "not_run")
+        if gate_required or historical_review:
+            from canonical_source_review import POLICY_VERSION, REPORT_SCHEMA, validate_review
+            if (not isinstance(review, dict) or review.get("schema") != REPORT_SCHEMA
+                    or review.get("policy") != POLICY_VERSION or review.get("failure")):
+                raise ValueError("Source-to-rule review is missing, invalid or unavailable for this mutation candidate")
+            binding = review.get("binding")
+            source_binding = [{key: deepcopy(row[key]) for key in ("id", "text", "source") if key in row} for row in packet]
+            if (not isinstance(binding, dict) or binding.get("policy") != POLICY_VERSION
+                    or binding.get("candidate_tlr") != tlr or binding.get("source_packet") != source_binding
+                    or not isinstance(binding.get("fixed_context"), dict)
+                    or not same_context(binding["fixed_context"], manifest["context"])):
+                raise ValueError("Source-to-rule review binding differs from the actual mutation source, candidate or fixed context")
+            expected_model = configuration.get("source_review_model")
+            if expected_model is not None and binding.get("reviewer_model") != expected_model:
+                raise ValueError("Source-to-rule reviewer model differs from the recorded workflow configuration")
+            inventory = binding.get("obligation_inventory")
+            if inventory_required:
+                from canonical_obligations import (POLICY_VERSION as INVENTORY_POLICY,
+                    REPORT_SCHEMA as INVENTORY_REPORT_SCHEMA, validate_inventory, validate_inventory_review)
+                preparation = run.get("obligation_preparation")
+                if (not isinstance(inventory, dict) or not isinstance(preparation, dict)
+                        or preparation.get("schema") != INVENTORY_REPORT_SCHEMA
+                        or preparation.get("policy") != INVENTORY_POLICY or preparation.get("failure")):
+                    raise ValueError("Source-to-rule obligation preparation is missing, invalid or unavailable")
+                inventory = validate_inventory(inventory, source_binding)
+                prepared_binding = preparation.get("binding")
+                if (not isinstance(prepared_binding, dict) or prepared_binding.get("policy") != INVENTORY_POLICY
+                        or prepared_binding.get("source_packet") != source_binding
+                        or prepared_binding.get("inventory") != inventory or preparation.get("inventory") != inventory
+                        or run.get("obligation_inventory") != inventory
+                        or (expected_model is not None and prepared_binding.get("model") != expected_model)):
+                    raise ValueError("Source-to-rule obligation preparation differs from the actual mutation source or frozen inventory")
+                prepared = validate_inventory_review(preparation.get("response"), source_binding, inventory)
+                if not prepared["complete"]:
+                    raise ValueError("Source-to-rule obligation preparation withheld this mutation candidate")
+            # Recompute eligibility from the response so edited summary fields
+            # cannot authorize a stale or rejected formula for a solver query.
+            checked = validate_review(review.get("response"), source_binding, tlr, obligation_inventory=inventory)
+            eligible = set(checked["eligible_ids"])
         for row in tlr["requirements"]:
             rid = row["id"]
-            if row["status"] == "supported":
+            if eligible is not None and rid not in eligible:
+                unsupported[rid] = "Source-to-rule review withheld this candidate rule; no executable mutation comparison"
+            elif row["status"] == "supported":
                 formulas[rid] = validate_formula(row["formula"], manifest["context"])
             else:
                 unsupported[rid] = row["reason"]
@@ -265,6 +316,7 @@ def extract_scalar_formulas(manifest, packet, run):
 
 def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout, model=None,
                      abstention_repairs=0, feedback_repairs=0):
+    feedback_repairs = feedback_repairs or abstention_repairs
     directory = output / "generations" / str(repetition) / vid
     directory.mkdir(parents=True)
     write_json(directory / "requirements.json", packet)
@@ -275,9 +327,7 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
                    "--statement", str((directory / "requirements.json").resolve()),
                    "--context-file", str((directory / "context.json").resolve()),
                    "--condition", "C", "--output-dir", str(run_directory),
-                   "--abstention-repairs", str(abstention_repairs)]
-        if feedback_repairs:
-            command.extend(["--feedback-repairs", str(feedback_repairs)])
+                   "--feedback-repairs", str(feedback_repairs), "--format-repairs", "0"]
         if model:
             command.extend(["--model", model])
     else:
@@ -329,7 +379,10 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
         # Retain the actual recovery ledger even when stdout was truncated or
         # the child reported an error after writing its execution artifacts.
         for field, filename in (("configuration", "configuration.json"), ("repair", "repair.json"),
-                                ("feedback_repair", "feedback_repair.json")):
+                                ("feedback_repair", "feedback_repair.json"),
+                                ("source_review", "source_review/report.json"),
+                                ("obligation_preparation", "obligation_inventory/report.json"),
+                                ("obligation_inventory", "obligation_inventory.json")):
             evidence_path = run_directory / filename
             if not isinstance(run.get(field), dict) and evidence_path.is_file():
                 try:
@@ -344,7 +397,8 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
     elapsed = time.monotonic() - started
     invocation = {"command": command, "engine": engine, "status": status, "returncode": returncode,
                   "latency_seconds": elapsed, "generation_timeout_seconds": timeout,
-                  "abstention_repairs": abstention_repairs, "feedback_repairs": feedback_repairs}
+                  "deprecated_abstention_alias_used": bool(abstention_repairs),
+                  "feedback_repairs": feedback_repairs, "format_repairs": 0}
     write_json(directory / "invocation.json", invocation)
     return {"variant_id": vid, "repetition": repetition, "source_requirements": packet,
             "formulas": formulas, "unsupported": unsupported, "status": status,
@@ -358,6 +412,9 @@ def _generate_sample(manifest, packet, vid, repetition, output, engine, timeout,
                 "configuration": deepcopy(run.get("configuration")),
                 "repair": deepcopy(run.get("repair")),
                 "feedback_repair": deepcopy(run.get("feedback_repair")),
+                "source_review": deepcopy(run.get("source_review")),
+                "obligation_preparation": deepcopy(run.get("obligation_preparation")),
+                "obligation_inventory": deepcopy(run.get("obligation_inventory")),
                 "scope": "Recorded runtime evidence; mutation comparator findings are separate."}}
 
 
@@ -369,7 +426,7 @@ def run_source(manifest, output, engine="pipeline", repetitions=1, max_generatio
     if type(feedback_repairs) is not int or not 0 <= feedback_repairs <= 5:
         raise ValueError("Feedback repairs must be an integer from 0 to 5")
     if abstention_repairs and feedback_repairs:
-        raise ValueError("Choose abstention recovery or feedback repairs, not both")
+        raise ValueError("abstention_repairs is a deprecated alias for feedback_repairs; supply only one budget")
     if engine == "local" and (abstention_repairs or feedback_repairs):
         raise ValueError("The local fixture engine cannot use LLM abstention or feedback repairs")
     manifest = validate_manifest(manifest)
@@ -383,20 +440,31 @@ def run_source(manifest, output, engine="pipeline", repetitions=1, max_generatio
     planned = repetitions * (1 + len(source_variants))
     if type(max_generations) is not int or not 1 <= max_generations <= 5000 or planned > max_generations:
         raise ValueError(f"Campaign needs {planned} workflow invocations; exceeds --max-generations {max_generations}")
+    deprecated_alias_used = bool(abstention_repairs)
+    feedback_repairs = feedback_repairs or abstention_repairs
+    generation_bound = 1 + feedback_repairs if engine == "pipeline" else 0
+    review_bound = preparation_bound = 0
     output, metadata = _new_output(output, manifest, "source", {"solver": solver, "timeout_seconds": timeout_seconds,
         "engine": engine, "repetitions": repetitions, "planned_workflow_invocations": planned,
         "max_generations": max_generations, "generation_timeout_seconds": generation_timeout_seconds,
-        "model": model, "abstention_repairs": abstention_repairs, "feedback_repairs": feedback_repairs,
+        "model": model, "feedback_repairs": feedback_repairs, "format_repairs": 0,
+        "deprecated_abstention_alias_used": deprecated_alias_used,
         "feedback_mode": "solver" if feedback_repairs else "none",
-        "max_additional_model_transport_invocations_per_workflow": 2 * abstention_repairs + feedback_repairs,
-        "max_model_transport_invocations_per_workflow": 1 + 2 * abstention_repairs + feedback_repairs if engine == "pipeline" else 0,
-        "max_model_transport_invocations": planned * (1 + 2 * abstention_repairs + feedback_repairs) if engine == "pipeline" else 0,
-        "generation_budget_scope": "max_generations bounds complete workflow invocations, not their internal model calls.",
+        "max_additional_model_transport_invocations_per_workflow": feedback_repairs,
+        "max_generation_and_repair_calls_per_workflow": generation_bound,
+        "max_source_review_calls_per_workflow": review_bound,
+        "max_source_review_calls": planned * review_bound,
+        "obligation_inventory_required": False,
+        "max_obligation_preparation_calls_per_workflow": preparation_bound,
+        "max_obligation_preparation_calls": planned * preparation_bound,
+        "max_model_transport_invocations_per_workflow": generation_bound + review_bound + preparation_bound,
+        "max_model_transport_invocations": planned * (generation_bound + review_bound + preparation_bound),
+        "generation_budget_scope": "max_generations bounds complete workflows; each pipeline workflow uses one initial generation and up to feedback_repairs source-grounded proposals. No separate inventory or source-review calls; initial format correction is disabled.",
         "feedback_boundary": "Only each trial's source packet, fixed context, declared policy and its own internal C audit feedback enter generation/repair; held-out reference formulas, mutation labels and comparison results remain evaluation-only.",
         "provider_policy": (
             "Canonical CLI condition C with fixed vocabulary/background and the same explicit bounded solver-feedback repair budget for baseline, mutants and controls; no held-out comparison findings enter repair."
             if feedback_repairs else
-            "Canonical CLI condition C with fixed vocabulary/background and the same explicit bounded abstention-recovery budget for baseline, mutants and controls."
+            "Canonical CLI condition C with fixed vocabulary/background and feedback disabled for baseline, mutants and controls."
             if engine == "pipeline" else "Legacy fixture workflow; no provider calls.")})
     candidates = {"schema": "mutation_candidates/1", "context": manifest["context"], "samples": []}
     for repetition in range(1, repetitions + 1):
@@ -407,7 +475,7 @@ def run_source(manifest, output, engine="pipeline", repetitions=1, max_generatio
             feedback_options = {"feedback_repairs": feedback_repairs} if feedback_repairs else {}
             candidates["samples"].append(_generate_sample(manifest, source_packet(manifest, variant), vid, repetition,
                                                         output, engine, generation_timeout_seconds, model=model,
-                                                        abstention_repairs=abstention_repairs, **feedback_options))
+                                                        abstention_repairs=0, **feedback_options))
             write_json(output / "candidates.json", candidates)
             write_json(output / "progress.json", {"completed_workflow_invocations": len(candidates["samples"]), "planned": planned})
     return _evaluate_samples(manifest, candidates, output, metadata, timeout_seconds, solver)

@@ -329,9 +329,9 @@ def main(argv=None):
             sub.add_argument("--repetitions", type=int, default=1)
             sub.add_argument("--max-generations", type=int, default=20)
             sub.add_argument("--abstention-repairs", type=int, choices=range(6), default=0,
-                             help="Same bounded source-grounded recovery budget for every generated trial (default 0); at most twice this many additional model transport invocations per workflow")
+                             help="Deprecated alias for --feedback-repairs; uses the same controller and call budget, not a second recovery loop")
             sub.add_argument("--feedback-repairs", type=int, choices=range(6), default=0,
-                             help="Same bounded C solver-feedback repair budget for every generated trial (default 0); mutually exclusive with positive abstention recovery and adds at most this many model transport invocations per workflow")
+                             help="Same bounded C source-grounded and solver-informed feedback budget for every generated trial (default 0); adds at most this many model calls, with no separate inventory or review calls")
             sub.add_argument("--generation-timeout-seconds", type=float, default=600)
         if command == "replay":
             sub.add_argument("--candidates", type=Path, required=True)

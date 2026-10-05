@@ -59,6 +59,9 @@ def manifest():
     }
 
 
+from source_review_support import pass_source_review
+
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ManifestValidationTests(unittest.TestCase):
     def test_reference_metadata_is_optional_and_does_not_claim_approval(self):
         from mutation_stress import validate_manifest
@@ -156,6 +159,7 @@ class ManifestValidationTests(unittest.TestCase):
             validate_manifest(source)
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class TypedFormulaTests(unittest.TestCase):
     def test_rejects_invalid_types_dimensions_nonlinearity_and_next_state(self):
         import mutation_core as core
@@ -191,6 +195,7 @@ class TypedFormulaTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("z3"), "Local Z3 executable is unavailable")
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class RealSolverMutationTests(unittest.TestCase):
     def compare(self, canonical, candidate, variables=None, background=None):
         import mutation_core as core
@@ -287,6 +292,7 @@ class RealSolverMutationTests(unittest.TestCase):
         self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, before)
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class InconclusiveSolverTests(unittest.TestCase):
     def test_one_sat_proves_difference_even_when_other_direction_unknown(self):
         import mutation_core as core
@@ -335,6 +341,7 @@ class InconclusiveSolverTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("z3"), "Local Z3 executable is unavailable")
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class FormalCampaignTests(unittest.TestCase):
     def campaign(self):
         source = manifest()
@@ -432,6 +439,7 @@ class FormalCampaignTests(unittest.TestCase):
             self.assertIn("Mutation campaign error", repeat.stderr)
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class SummaryOutcomeTests(unittest.TestCase):
     def test_unresolved_trials_remain_in_planned_denominator(self):
         from mutation_stress import summarize
@@ -477,6 +485,7 @@ def replay_fixture(source=None, baseline_value=10, candidate_value=9):
     return source, {"schema": "mutation_candidates/1", "samples": samples}
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ReplayTrustBoundaryTests(unittest.TestCase):
     def test_legacy_hashes_are_optional_informational_metadata(self):
         from mutation_sources import validate_candidates
@@ -557,6 +566,7 @@ class ReplayTrustBoundaryTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("z3"), "Local Z3 executable is unavailable")
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ReplaySemanticTests(unittest.TestCase):
     def run_replay(self, source, payload):
         from mutation_stress import run_replay
@@ -685,6 +695,7 @@ class ReplaySemanticTests(unittest.TestCase):
         self.assertTrue(row["comparison"]["difference_detected"])
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class ScalarExtractionTests(unittest.TestCase):
     def fixture(self):
         from mutation_stress import validate_manifest
@@ -754,6 +765,7 @@ class ScalarExtractionTests(unittest.TestCase):
                 self.assertIn("R1", unsupported)
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class CanonicalExtractionTests(unittest.TestCase):
     def fixture(self):
         from mutation_sources import source_packet
@@ -882,11 +894,14 @@ class CanonicalExtractionTests(unittest.TestCase):
         self.assertIn("canonical_cli.py", command[1])
         self.assertEqual(command[command.index("--condition") + 1], "C")
         self.assertEqual(command[command.index("--model") + 1], "test-model")
-        self.assertEqual(command[command.index("--abstention-repairs") + 1], "0")
+        self.assertNotIn("--abstention-repairs", command)
+        self.assertEqual(command[command.index("--feedback-repairs") + 1], "0")
+        self.assertEqual(command[command.index("--format-repairs") + 1], "0")
         self.assertEqual(result["formulas"]["R1"], expr(">=", {"var": "n", "at": "current"}, literal(7)))
         self.assertEqual(result["status"], "completed")
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class SourceGenerationBudgetTests(unittest.TestCase):
     def test_workflow_budget_is_checked_before_output_or_generation(self):
         import mutation_sources as sources
@@ -936,6 +951,7 @@ class SourceGenerationBudgetTests(unittest.TestCase):
         self.assertEqual(report["comparisons"][0]["frozen_neighbor_unsupported_ids"], ["R2"])
         self.assertEqual(report["source_metrics"]["attributable_preserved_mutants"], 1)
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class SourceAbstentionRecoveryTests(unittest.TestCase):
     def test_invalid_budgets_and_fixture_recovery_fail_before_output_or_calls(self):
         import mutation_sources as sources
@@ -960,10 +976,10 @@ class SourceAbstentionRecoveryTests(unittest.TestCase):
             "text": "At least ten languages shall be supported by the controller."})
         observed = []
         def generate(manifest_value, packet, vid, repetition, output, engine, timeout,
-                     model=None, abstention_repairs=0):
+                     model=None, abstention_repairs=0, feedback_repairs=0):
             observed.append({"packet": deepcopy(packet), "variant": vid,
                 "context": deepcopy(manifest_value["context"]), "model": model,
-                "abstention_repairs": abstention_repairs})
+                "abstention_repairs": abstention_repairs, "feedback_repairs": feedback_repairs})
             return {"variant_id": vid, "repetition": repetition}
         with tempfile.TemporaryDirectory() as tmp, patch.object(sources, "_generate_sample", side_effect=generate), \
                 patch.object(sources, "_evaluate_samples", side_effect=lambda m, c, o, meta, t, z: meta):
@@ -971,11 +987,14 @@ class SourceAbstentionRecoveryTests(unittest.TestCase):
                                           abstention_repairs=2, model="same-generation-model")
         config = metadata["configuration"]
         self.assertEqual(config["planned_workflow_invocations"], 3)
-        self.assertEqual(config["max_additional_model_transport_invocations_per_workflow"], 4)
-        self.assertEqual(config["max_model_transport_invocations_per_workflow"], 5)
-        self.assertEqual(config["max_model_transport_invocations"], 15)
+        self.assertEqual(config["max_additional_model_transport_invocations_per_workflow"], 2)
+        self.assertEqual(config["max_generation_and_repair_calls_per_workflow"], 3)
+        self.assertEqual(config["max_source_review_calls_per_workflow"], 0)
+        self.assertEqual(config["max_obligation_preparation_calls_per_workflow"], 0)
+        self.assertEqual(config["max_model_transport_invocations_per_workflow"], 3)
+        self.assertEqual(config["max_model_transport_invocations"], 9)
         self.assertEqual([x["variant"] for x in observed], ["baseline", "R1_limit_weakened", "R1_paraphrase"])
-        self.assertTrue(all(x["abstention_repairs"] == 2 for x in observed))
+        self.assertTrue(all(x["abstention_repairs"] == 0 and x["feedback_repairs"] == 2 for x in observed))
         self.assertTrue(all(x["model"] == "same-generation-model" for x in observed))
         self.assertTrue(all(x["context"] == sources.validate_manifest(source)["context"] for x in observed))
         self.assertTrue(all(set(row) == {"id", "text", "source"} for x in observed for row in x["packet"]))
@@ -1006,7 +1025,8 @@ class SourceAbstentionRecoveryTests(unittest.TestCase):
             result = sources._generate_sample(source, packet, "baseline", 1, Path(tmp),
                 "pipeline", 5, model="test-model", abstention_repairs=2)
             command = observed[0]
-            self.assertEqual(command[command.index("--abstention-repairs") + 1], "2")
+            self.assertNotIn("--abstention-repairs", command)
+            self.assertEqual(command[command.index("--feedback-repairs") + 1], "2")
             supplied = json.loads(Path(command[command.index("--context-file") + 1]).read_text())
             self.assertEqual(supplied, source["context"])
         self.assertEqual(result["runtime_evidence"]["configuration"], config)
@@ -1030,6 +1050,7 @@ class SourceAbstentionRecoveryTests(unittest.TestCase):
                 self.assertEqual(generate.call_args.kwargs["abstention_repairs"], value or 0)
 
 
+@patch("canonical_cli._review_ask", new=pass_source_review)
 class SourceSolverFeedbackTests(unittest.TestCase):
     def test_invalid_feedback_and_combined_budgets_fail_before_output_or_calls(self):
         import mutation_sources as sources
@@ -1067,6 +1088,9 @@ class SourceSolverFeedbackTests(unittest.TestCase):
         config = metadata["configuration"]
         self.assertEqual(config["planned_workflow_invocations"], 3)
         self.assertEqual(config["max_additional_model_transport_invocations_per_workflow"], 2)
+        self.assertEqual(config["max_generation_and_repair_calls_per_workflow"], 3)
+        self.assertEqual(config["max_source_review_calls_per_workflow"], 0)
+        self.assertEqual(config["max_obligation_preparation_calls_per_workflow"], 0)
         self.assertEqual(config["max_model_transport_invocations_per_workflow"], 3)
         self.assertEqual(config["max_model_transport_invocations"], 9)
         self.assertEqual(config["feedback_mode"], "solver")
@@ -1102,7 +1126,8 @@ class SourceSolverFeedbackTests(unittest.TestCase):
             result = sources._generate_sample(source, packet, "baseline", 1, Path(tmp),
                 "pipeline", 5, model="test-model", feedback_repairs=2)
             command = observed[0]
-            self.assertEqual(command[command.index("--abstention-repairs") + 1], "0")
+            self.assertNotIn("--abstention-repairs", command)
+            self.assertEqual(command[command.index("--format-repairs") + 1], "0")
             self.assertEqual(command[command.index("--feedback-repairs") + 1], "2")
             self.assertEqual(command[command.index("--condition") + 1], "C")
             self.assertEqual(command[command.index("--model") + 1], "test-model")
