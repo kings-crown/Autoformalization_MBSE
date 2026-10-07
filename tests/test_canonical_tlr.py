@@ -32,6 +32,27 @@ def fixture():
 
 
 class CanonicalTlrTests(unittest.TestCase):
+    def test_variable_name_length_boundary_and_identifier_safety(self):
+        name = "v" + "A0_" * 21
+        self.assertEqual(len(name), 64)
+        source_id = "source-" + "r" * 70
+        payload = {"schema": "mbse_tlr/1",
+            "variables": [{"name": name, "type": "Bool"}],
+            "requirements": [{"id": source_id, "text": "The named operation shall be available.",
+                              "status": "supported", "formula": {"var": name}}]}
+        normalized = validate_tlr(payload)
+        self.assertEqual(normalized["variables"][0]["name"], name)
+        self.assertEqual(normalized["requirements"][0]["id"], source_id)
+        self.assertEqual(emit_formula(normalized["requirements"][0]["formula"], tlr_context(normalized)),
+                         f"v_{name}_0")
+        self.assertIn(name, render_sysml(normalized))
+        for invalid in (name + "x", "_leading", "1leading", "has-hyphen", "naïve", "x\n", "x)(assert false)"):
+            changed = deepcopy(payload)
+            changed["variables"][0]["name"] = invalid
+            changed["requirements"][0]["formula"] = {"var": invalid}
+            with self.subTest(name=invalid), self.assertRaisesRegex(ValueError, "at most 64 characters"):
+                validate_tlr(changed)
+
     def test_normalizes_units_and_preserves_sources_without_attestations(self):
         sources, payload = fixture()
         original = deepcopy(payload)

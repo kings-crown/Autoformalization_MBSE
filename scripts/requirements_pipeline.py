@@ -27,9 +27,11 @@ import copy
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -244,7 +246,28 @@ def _extract_json_payload(text: str) -> Dict[str, Any]:
     return payload
 
 
-def _run_codex_exec(prompt: str, model: str) -> str:
+def _codex_timeout_seconds(timeout_seconds=None) -> float:
+    value = (_env_float("CODEX_EXEC_TIMEOUT", 180.0, minimum=1.0)
+             if timeout_seconds is None else timeout_seconds)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 1:
+        raise ValueError("Codex timeout must be a finite number of at least one second.")
+    return float(value)
+
+
+CODEX_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _codex_reasoning_effort(reasoning_effort=None) -> str:
+    """Resolve a per-call setting without changing defaults for other requests."""
+    value = os.getenv("CODEX_REASONING_EFFORT", "low") if reasoning_effort is None else reasoning_effort
+    if not isinstance(value, str) or value not in CODEX_REASONING_EFFORTS:
+        raise ValueError("Codex reasoning effort must be one of: " + ", ".join(CODEX_REASONING_EFFORTS) + ".")
+    return value
+
+
+def _run_codex_exec(prompt: str, model: str, *, timeout_seconds=None, reasoning_effort=None) -> str:
+    timeout_seconds = _codex_timeout_seconds(timeout_seconds)
+    reasoning_effort = _codex_reasoning_effort(reasoning_effort)
     codex_path = shutil.which("codex")
     if codex_path is None:
         raise RuntimeError("Codex CLI not found in PATH. Install/enable 'codex' first.")
@@ -268,7 +291,7 @@ def _run_codex_exec(prompt: str, model: str) -> str:
         "-c",
         "sandbox_permissions=[]",
         "-c",
-        f'model_reasoning_effort="{os.getenv("CODEX_REASONING_EFFORT", "low")}"',
+        f'model_reasoning_effort="{reasoning_effort}"',
         "--output-last-message",
         str(tmp_path),
         "--cd",
@@ -280,41 +303,38 @@ def _run_codex_exec(prompt: str, model: str) -> str:
         cmd.extend(["--model", model])
     cmd.append("-")
 
-    timeout_seconds = _env_float("CODEX_EXEC_TIMEOUT", 180.0, minimum=1.0)
     stream_output = _env_true("CODEX_STREAM", default=False)
     try:
-        if stream_output:
-            result = subprocess.run(
-                cmd,
-                input=prompt,
-                text=True,
-                check=False,
-                timeout=timeout_seconds,
-            )
-        else:
-            result = subprocess.run(
-                cmd,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=timeout_seconds,
-            )
-    except subprocess.TimeoutExpired as exc:
-        if stream_output:
-            raise RuntimeError(
-                f"codex exec timed out after {timeout_seconds:.0f}s. "
-                "Streaming was enabled; inspect terminal output above for latest progress."
-            ) from exc
-        stdout = str(getattr(exc, "stdout", "") or "").strip()
-        stderr = str(getattr(exc, "stderr", "") or "").strip()
-        raise RuntimeError(
-            f"codex exec timed out after {timeout_seconds:.0f}s. "
-            "Increase CODEX_EXEC_TIMEOUT if needed. "
-            f"stdout={stdout[:240]!r} stderr={stderr[:240]!r}"
-        ) from exc
-
-    try:
+        # The installed Codex launcher can spawn a native child. Own its process
+        # group so a timeout terminates both, rather than just the launcher.
+        with subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True,
+                              stdout=None if stream_output else subprocess.PIPE,
+                              stderr=None if stream_output else subprocess.PIPE,
+                              start_new_session=(os.name == "posix")) as process:
+            try:
+                stdout, stderr = process.communicate(prompt, timeout=timeout_seconds)
+            except BaseException as exc:
+                try:
+                    if os.name == "posix":
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+                if not isinstance(exc, subprocess.TimeoutExpired):
+                    raise
+                if stream_output:
+                    raise RuntimeError(
+                        f"codex exec timed out after {timeout_seconds:.0f}s. "
+                        "Streaming was enabled; inspect terminal output above for latest progress."
+                    ) from exc
+                raise RuntimeError(
+                    f"codex exec timed out after {timeout_seconds:.0f}s. "
+                    "Increase the call timeout or CODEX_EXEC_TIMEOUT if needed. "
+                    f"stdout={(stdout or '').strip()[:240]!r} stderr={(stderr or '').strip()[:240]!r}"
+                ) from exc
+            result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
         answer = tmp_path.read_text(encoding="utf-8").strip()
     finally:
         tmp_path.unlink(missing_ok=True)

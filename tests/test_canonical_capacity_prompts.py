@@ -22,6 +22,7 @@ from canonical_feedback import feedback_instructions
 from canonical_patterns import INSTRUCTIONS
 from canonical_repair import REPAIR_INSTRUCTIONS
 from mutation_core import STATIC_MAX_VARIABLES, validate_context
+from review_behavior import VARIABLE_NAME_GUIDE
 prompts = {'initial': TLR_INSTRUCTIONS, 'feedback_frozen': feedback_instructions(False),
            'feedback_generated': feedback_instructions(True), 'abstention': REPAIR_INSTRUCTIONS,
            'capability': INSTRUCTIONS,
@@ -34,6 +35,8 @@ try:
 except ValueError:
     accepts_25 = False
 print(json.dumps({'capacity': STATIC_MAX_VARIABLES, 'prompt_limits': counts, 'accepts_25': accepts_25,
+                  'variable_name_limits_match': 'at most 64 characters' in VARIABLE_NAME_GUIDE
+                      and all(VARIABLE_NAME_GUIDE in text for text in prompts.values()),
                   'assumption_limits_unchanged': all('40 background assumptions' in text
                       for name, text in prompts.items() if name != 'capability')}))
 '''
@@ -49,6 +52,7 @@ print(json.dumps({'capacity': STATIC_MAX_VARIABLES, 'prompt_limits': counts, 'ac
                 self.assertEqual(result['capacity'], expected)
                 self.assertEqual(result['accepts_25'], expected >= 25)
                 self.assertTrue(result['assumption_limits_unchanged'])
+                self.assertTrue(result['variable_name_limits_match'])
                 for name, limits in result['prompt_limits'].items():
                     self.assertTrue(limits, name)
                     self.assertEqual(set(limits), {expected}, name)

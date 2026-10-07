@@ -13,6 +13,7 @@ import sys
 import time
 from canonical_abstractions import POLICY_VERSION, POLICY, POLICY_TEXT, PROFILE, representation_summary
 from mutation_core import STATIC_MAX_VARIABLES
+from review_behavior import VARIABLE_NAME_GUIDE
 
 ROOT = Path(__file__).resolve().parents[1]
 TLR_INSTRUCTIONS = '''Return a single JSON object, schema "mbse_tlr/1". Required keys:
@@ -30,7 +31,7 @@ Do not return SysML, solver outcomes, approvals, hashes, or provenance certifica
 '''
 SYSML_INSTRUCTIONS = '''Return only SysML v2 textual syntax for the supplied source requirements. Use one package with ScalarValues, a shared subject part definition with Boolean/Integer/Real attributes, and one requirement usage per source ID with actual require constraints for supported obligations. Retain exact source text in documentation. Numeric attributes denote canonical magnitudes; document their units. Preserve conditions, inclusive/exclusive bounds, quantity identities and genuine environmental assumptions. Unsupported temporal, probabilistic or otherwise unrepresentable clauses must remain explicitly documented as unsupported; do not invent Boolean placeholders or extra architecture. Use the supplied fixed vocabulary/background if present. Do not output TLR, SMT, explanations, approvals, hashes or invented verification results.'''
 
-TLR_INSTRUCTIONS += "\n" + POLICY_TEXT
+TLR_INSTRUCTIONS += "\n" + POLICY_TEXT + '\n' + VARIABLE_NAME_GUIDE
 TLR_INSTRUCTIONS = TLR_INSTRUCTIONS.replace("at most 24 variables", f"at most {STATIC_MAX_VARIABLES} variables")
 SYSML_INSTRUCTIONS += "\nDocument each supported requirement's abstraction kind, meaning, scope and limitations; for a capability also its subject, operation and bound Boolean symbol. Define every referenced attribute's meaning. When fixed_context supplies symbol_meanings, preserve those definitions in the corresponding attribute documentation. Use the same abstraction kinds and limits as the shared policy, without emitting JSON or TLR.\n" + POLICY_TEXT
 
@@ -110,16 +111,23 @@ def _model(requested=None):
     return _selected_model(os.environ)[0]
 
 
-def _ask(system, prompt, model, directory, call_id):
-    from requirements_pipeline import _run_codex_exec
+def _ask(system, prompt, model, directory, call_id, *, timeout_seconds=None, reasoning_effort=None):
+    from requirements_pipeline import _codex_reasoning_effort, _codex_timeout_seconds, _run_codex_exec
     record = {"model": model, "system_prompt": system, "user_prompt": prompt,
+              "timeout_seconds": _codex_timeout_seconds(timeout_seconds),
+              "reasoning_effort": _codex_reasoning_effort(reasoning_effort),
               "status": "running", "input_tokens": None, "output_tokens": None, "estimated_cost": None,
               "usage_note": "Unavailable unless reported by the configured transport; not treated as zero."}
     started = time.monotonic()
     write_json(directory / (call_id + ".json"), record)
     try:
         composed = "System instructions:\n" + system.strip() + "\n\nUser request:\n" + prompt.strip() + "\n"
-        response = _run_codex_exec(composed, model)
+        options = {}
+        if timeout_seconds is not None:
+            options["timeout_seconds"] = record["timeout_seconds"]
+        if reasoning_effort is not None:
+            options["reasoning_effort"] = record["reasoning_effort"]
+        response = _run_codex_exec(composed, model, **options)
         record.update(status="completed", response=response)
         return response
     except Exception as exc:

@@ -23,6 +23,12 @@ MAX_VARIABLES = 24
 MAX_PROPERTIES = 16
 MAX_NODES = 1600
 IDENT = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,47}\Z")
+MAX_VARIABLE_NAME_LENGTH = 64
+VARIABLE_IDENT = re.compile(rf"[A-Za-z][A-Za-z0-9_]{{0,{MAX_VARIABLE_NAME_LENGTH - 1}}}\Z")
+VARIABLE_NAME_GUIDE = (
+    "Variable names start with an ASCII letter, contain only ASCII letters, digits or underscores, "
+    f"and have at most {MAX_VARIABLE_NAME_LENGTH} characters."
+)
 NUMBER = re.compile(r"[+-]?\d+(?:\.\d+)?\Z")
 ROLES = {"state", "input", "output", "disturbance", "parameter"}
 TYPES = {"Bool", "Int", "Real"}
@@ -30,7 +36,7 @@ TYPES = {"Bool", "Int", "Real"}
 
 BEHAVIOR_GUIDE = """Produce one JSON object, with no raw code/SMT, schema review_behavior/1.
 Required top-level fields: schema, horizon (integer 1..20), step:{value:exact decimal string,unit:time unit}, variables (1..24), initial:[Boolean AST], transitions:[Boolean AST], properties (1..16). Optional assumptions defaults []. No other fields are allowed anywhere.
-A variable is {name:identifier,type:Bool|Int|Real,role:state|input|output|disturbance|parameter,unit?:unit,bounds?:{lower?:decimal,upper?:decimal},value?:fixed_value}. Name is 1..48 letters/digits/underscore starting with a letter. Bool has no unit/bounds. Numeric defaults unit 1. Parameters MUST have fixed value (Boolean for Bool; exact decimal string/integer otherwise); other roles MUST NOT have value. Initial values belong in initial predicates. Numeric bounds are inclusive assumptions, not properties. Int requires canonical units and integral bounds/value. Unconstrained state/output/input/disturbance values are nondeterministic; every step's disturbance may vary adversarially. Parameters are constant literal values, not synthesis unknowns.
+A variable is {name:identifier,type:Bool|Int|Real,role:state|input|output|disturbance|parameter,unit?:unit,bounds?:{lower?:decimal,upper?:decimal},value?:fixed_value}. Bool has no unit/bounds. Numeric defaults unit 1. Parameters MUST have fixed value (Boolean for Bool; exact decimal string/integer otherwise); other roles MUST NOT have value. Initial values belong in initial predicates. Numeric bounds are inclusive assumptions, not properties. Int requires canonical units and integral bounds/value. Unconstrained state/output/input/disturbance values are nondeterministic; every step's disturbance may vary adversarially. Parameters are constant literal values, not synthesis unknowns.
 AST forms: true/false; {var:name,at?:current|next}; {value:exact_decimal_string_or_integer,unit?:unit}; {op:operator,args:[AST,...]}. next is permitted only within transitions and transition-scope assumptions. Numbers cannot be floats, exponent strings, NaN, raw SMT, or code; at most 30 characters after normalization and absolute value <=1000000000000. Supported units include 1, s, ms, min, V, mV, A, mA, W, kW, J, kJ, Wh, kWh, m, cm, mm, km, kg, g, %, K (plus their declared word aliases). Unit conversion is exact; comparisons/addition/subtraction require equal physical dimensions. step must normalize to positive seconds. Window values are integer STEP OFFSETS, not physical durations; multiply by step for elapsed time.
 Allowed operators and arity: and/or 2..16 Bool; not 1 Bool; implies 2 Bool; =/!= 2 compatible operands; </<=/>/>= 2 numeric operands of same dimension; + 2 numeric same dimension; - 1 or 2 numeric same dimension; * 2 numeric, with at least one fixed dimensionless literal/parameter factor (linear arithmetic only); ite 3 (Boolean condition, two compatible branches). No division, quantifiers, temporal raw formulas, dynamic indexing, function calls, or nonlinear products. Expression depth <=16; total nodes <=1600. Each initial/transitions list <=80 predicates.
 Assumption: {id:identifier,text:nonempty explanation <=2000 characters,scope:initial|always|transition,predicate:Boolean_AST}; <=40, unique ids. initial means step 0, always all states 0..H, transition each transition 0..H-1. Dynamics must be stated independently of properties; never assume a required guarantee as an invariant merely to make its proof pass.
@@ -40,6 +46,7 @@ Property ids must be unique identifiers. Every property has id, requirement_ids:
 3. eventual_response: required trigger:Boolean_AST,response:Boolean_AST; no window, response_semantics, predicate, or margin. This states unbounded eventual response and is ALWAYS unproved by this finite engine, even if a finite completion witness exists.
 The SMT model is a finite synchronous transition-system proposal. Queries quantify implicitly over full H-transition executions satisfying initial/dynamics/domains/assumptions; deadlocks and shorter nonextendable executions are not verified. Properties remain separate counterexample queries. SAT feasibility is not safety; bounded UNSAT is not unbounded liveness. Preserve source uncertainty in model assumptions and leave engineer approval pending.
 """
+BEHAVIOR_GUIDE += VARIABLE_NAME_GUIDE + "\n"
 
 
 def _keys(obj: Any, allowed: set[str], required: set[str], label: str) -> dict:
@@ -110,7 +117,9 @@ def validate_behavior(payload: dict, requirement_ids: list[str], *, max_variable
     variables, table = [], {}
     for raw in raw_variables:
         _keys(raw, {"name", "type", "role", "unit", "bounds", "value"}, {"name", "type", "role"}, "Variable")
-        name = _name(raw["name"], "Variable name")
+        name = raw["name"]
+        if not isinstance(name, str) or not VARIABLE_IDENT.fullmatch(name):
+            raise ValueError(f"Variable name must be a simple identifier of at most {MAX_VARIABLE_NAME_LENGTH} characters.")
         if name in table or not isinstance(raw["type"], str) or raw["type"] not in TYPES or not isinstance(raw["role"], str) or raw["role"] not in ROLES:
             raise ValueError(f"Duplicate variable or unsupported type/role: {name}.")
         var = {"name": name, "type": raw["type"], "role": raw["role"]}

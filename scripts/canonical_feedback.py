@@ -17,6 +17,7 @@ from canonical_repair import (_check_fixed, _context, _failure, _input, _keys,
                               _text, MODEL_SOURCE_POLICY)
 from canonical_tlr import _references
 from mutation_core import STATIC_MAX_VARIABLES
+from review_behavior import VARIABLE_NAME_GUIDE
 
 FEEDBACK_POLICY_VERSION = 'source_grounded_semantic_feedback/3'
 PROPOSAL_SCHEMA = 'semantic_repair_proposal/1'
@@ -39,7 +40,7 @@ When solver_feedback is absent, perform source-only review with the same permitt
 '''
 from canonical_patterns import INSTRUCTIONS as PATTERN_INSTRUCTIONS, POLICY_VERSION as PATTERN_POLICY
 # Optional pattern helpers do not add a stage to the standard feedback loop.
-FEEDBACK_INSTRUCTIONS += '\n\nReview unsupported/unresolved rows too: propose a source-grounded repair when the declared profile can represent the obligation; otherwise retain its concrete limitation. Do not require missing implementation details for a named capability.\n\n' + MODEL_SOURCE_POLICY.replace('accepted_tlr', 'current_tlr') + '\n\n' + POLICY_TEXT
+FEEDBACK_INSTRUCTIONS += '\n\nReview unsupported/unresolved rows too: propose a source-grounded repair when the declared profile can represent the obligation; otherwise retain its concrete limitation. Do not require missing implementation details for a named capability.\n\n' + MODEL_SOURCE_POLICY.replace('accepted_tlr', 'current_tlr') + '\n\n' + POLICY_TEXT + '\n' + VARIABLE_NAME_GUIDE
 FEEDBACK_INSTRUCTIONS = FEEDBACK_INSTRUCTIONS.replace('at most 24 variables', f'at most {STATIC_MAX_VARIABLES} variables')
 
 

@@ -39,14 +39,17 @@ class PatternTests(unittest.TestCase):
         from canonical_patterns import INSTRUCTIONS
         sources, before, raw = proposal()
         binding = raw["capability_bindings"][0]
-        binding["symbol"] = "c" * 48
+        binding["symbol"] = "c" * 64
         variable, row = compile_capability(binding, before["requirements"][1])
-        self.assertEqual(len(variable["name"]), 48)
-        self.assertEqual(row["formula"], {"var": "c" * 48})
-        binding["symbol"] = "c" * 49
-        with self.assertRaisesRegex(ValueError, "48"):
+        self.assertEqual(len(variable["name"]), 64)
+        self.assertEqual(row["formula"], {"var": "c" * 64})
+        result = validate_feedback_proposal(raw, sources, before,
+            allow_generated_context_repair=True, require_pattern_diagnostics=True)
+        self.assertEqual(result["tlr"]["requirements"][1]["formula"]["var"], "c" * 64)
+        binding["symbol"] = "c" * 65
+        with self.assertRaisesRegex(ValueError, "64"):
             compile_capability(binding, before["requirements"][1])
-        self.assertIn("at most 48 characters", INSTRUCTIONS)
+        self.assertIn("at most 64 characters", INSTRUCTIONS)
 
 
     def test_expand_and_review_are_separate_with_complete_source_and_context_diff(self):

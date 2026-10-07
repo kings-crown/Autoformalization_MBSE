@@ -55,6 +55,25 @@ class ValidationTests(unittest.TestCase):
     def validate(self, model):
         return behavior.validate_behavior(model, ['R1', 'R2', 'R3'])
 
+    def test_variable_names_allow_64_while_other_identifiers_retain_48(self):
+        name = "x" * 64
+        model = minimal(op('>=', v(name), c(0, 'V')))
+        model['variables'][0]['name'] = name
+        self.assertEqual(self.validate(model)['variables'][0]['name'], name)
+        self.assertIn('at most 64 characters', behavior.BEHAVIOR_GUIDE)
+        model['variables'][0]['name'] = name + 'x'
+        with self.assertRaisesRegex(ValueError, 'Variable name.*64'):
+            self.validate(model)
+        model['variables'][0]['name'] = name
+        model['assumptions'] = [{'id': 'a' * 48, 'text': 'Explicit premise', 'scope': 'initial', 'predicate': True}]
+        model['properties'][0]['id'] = 'p' * 48
+        self.validate(model)
+        for field in ('assumptions', 'properties'):
+            changed = copy.deepcopy(model)
+            changed[field][0]['id'] += 'x'
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, '48'):
+                self.validate(changed)
+
     def test_supported_examples_normalize_idempotently(self):
         for name in ('response', 'charging', 'disturbance'):
             with self.subTest(name=name):

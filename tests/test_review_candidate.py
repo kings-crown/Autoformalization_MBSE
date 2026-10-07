@@ -153,6 +153,23 @@ class CandidateEditingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             edit_candidate(behavior, SOURCES, [{'pointer': '/initial/0', 'expression': 'true'}] * 2)
 
+    def test_parser_variable_name_boundary_in_bare_and_explicit_references(self):
+        name = 'v' * 64
+        for template, at in (('{}', 'current'), ('var({})', 'current'), ('next({})', 'next')):
+            with self.subTest(template=template):
+                self.assertEqual(parse_expression(template.format(name)), {'var': name, 'at': at})
+                with self.assertRaises(ValueError):
+                    parse_expression(template.format(name + 'x'))
+        model = candidate()
+        # Round-trip a full candidate using the longest valid name.
+        model = json.loads(json.dumps(model).replace('voltage', name))
+        model['properties'][0]['id'] = 'P_voltage'
+        normalized = validate_behavior(model, ['R1', 'R2'])
+        inspection = inspect_candidate(normalized, SOURCES)
+        edits = [{'pointer': row['pointer'], 'expression': row['expression']}
+                 for row in inspection['rows'] if row['editable']]
+        self.assertEqual(edit_candidate(normalized, SOURCES, edits)['behavior'], normalized)
+
     def test_parser_rejects_raw_code_smt_and_resource_exhaustion(self):
         bad = ['__import__("os").system("echo bad")', '(assert false)', '(<= voltage 28)', 'voltage / 2', 'voltage ** 2',
                'voltage; false', 'voltage[0]', '1e3', 'NaN()', 'next(voltage,voltage)', 'ite(true, 1, 2, 3)',

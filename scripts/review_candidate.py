@@ -13,7 +13,7 @@ import json
 import re
 from typing import Any
 
-from review_behavior import validate_behavior
+from review_behavior import VARIABLE_IDENT, validate_behavior
 
 SCHEMA = 'review_candidate/1'
 ORIGINS = {'unspecified', 'source', 'design', 'environment', 'llm'}
@@ -116,7 +116,7 @@ def parse_expression(text: str) -> Any:
         elif token in {'next', 'var'} and peek() == '(':
             take('(')
             name = take()
-            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,47}', name):
+            if not VARIABLE_IDENT.fullmatch(name):
                 raise ValueError('Variable references require a declared identifier.')
             take(')')
             left = {'var': name, 'at': 'next' if token == 'next' else 'current'}
@@ -128,7 +128,7 @@ def parse_expression(text: str) -> Any:
                 args.append(expr(0, depth + 1))
             take(')')
             left = {'op': 'ite', 'args': args}
-        elif re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,47}', token) and token not in _KEYWORDS:
+        elif VARIABLE_IDENT.fullmatch(token) and token not in _KEYWORDS:
             left = {'var': token, 'at': 'current'}
         else:
             raise ValueError(f'Expected a literal or variable; found {token!r}.')

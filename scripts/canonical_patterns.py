@@ -4,8 +4,8 @@ Applicability and source meaning are LLM claims; deterministic expansion
 produces a candidate, not evidence of semantic fidelity.
 """
 from copy import deepcopy
-import re
 from mutation_core import STATIC_MAX_VARIABLES
+from review_behavior import MAX_VARIABLE_NAME_LENGTH, VARIABLE_IDENT, VARIABLE_NAME_GUIDE
 
 POLICY_VERSION = 'explicit_abstention_patterns/1'
 INSTRUCTIONS = '''For every currently unsupported/unresolved requirement, add exactly one abstention_diagnostics entry to the proposal envelope:
@@ -13,10 +13,11 @@ INSTRUCTIONS = '''For every currently unsupported/unresolved requirement, add ex
 A blocked decision needs at least one concrete missing semantic slot, unavailable operator, or two distinct interpretations with materially different obligations. Unspecified implementation, algorithm, address realization, scheduling, concurrency, or preparation questions alone cannot justify blocking a pure capability: explain why the detail changes the required meaning, otherwise list it only in realization_details. Source-supported concurrency qualifications must remain in operation/scope; actual ordering/history cannot be turned into availability. repair_other means actually propose a supported state_constraint or event_relation, not merely recommend another future review.
 For capability_candidate, instantiate the ENTIRE requirement at capability level and add one capability_bindings entry:
 {"id":source_ID,"subject":named_subject,"operation":named_operation,"scope":complete_source_scope,"symbol":Boolean_identifier,"meaning":complete_availability_definition,"limitations":[explicit_limits],"whole_obligation":true,"residual_obligations":[],"source_basis":[{"source_id":source_ID,"quote":literal_own_requirement_quote}]}.
-This is not permission to project one conjunct, remove a guard, or turn actual behavior into an availability flag. If residual obligations require different semantics, use repair_other or blocked. For capability_candidate, missing_slots, unsupported_operators and alternatives must be empty. The controller expands the binding into an unbounded Bool variable (description=meaning), formula {"var":symbol}, and capability metadata. Leave that requirement's original withheld row in tlr (or provide the exact corresponding expansion); do not invent a second formula. Mark its reviews outcome changed, quoting the original source and explaining the interpretation. A new variable's context review is deterministically recorded from the binding; do not needlessly duplicate it. Existing symbol definitions and fixed context cannot be overwritten by a binding. Use a fresh descriptive symbol if required, within the 24-symbol profile. A symbol starts with an ASCII letter, contains only ASCII letters, digits or underscores, and has at most 48 characters. For repair_other/blocked do not supply a capability binding. Include capability_bindings:[] when none apply.
+This is not permission to project one conjunct, remove a guard, or turn actual behavior into an availability flag. If residual obligations require different semantics, use repair_other or blocked. For capability_candidate, missing_slots, unsupported_operators and alternatives must be empty. The controller expands the binding into an unbounded Bool variable (description=meaning), formula {"var":symbol}, and capability metadata. Leave that requirement's original withheld row in tlr (or provide the exact corresponding expansion); do not invent a second formula. Mark its reviews outcome changed, quoting the original source and explaining the interpretation. A new variable's context review is deterministically recorded from the binding; do not needlessly duplicate it. Existing symbol definitions and fixed context cannot be overwritten by a binding. Use a fresh descriptive symbol if required, within the 24-symbol profile. For repair_other/blocked do not supply a capability binding. Include capability_bindings:[] when none apply.
 If a frozen obligation inventory is supplied, include explicit coverage on the proposed TLR row for the expanded capability, even when leaving the original withheld placeholder for deterministic compilation. Its formula_path and operation slot must point to the expanded /formula. The controller preserves these supplied mappings without inventing them, copying old mappings, or granting coverage; structural coverage and independent component review still apply.
 Every applicable capability must therefore receive an actual candidate expansion in this same bounded proposal, before an unchanged proposal can stop recovery. These structured diagnoses/bindings are recorded claims, not automatic acceptance. Source-to-rule review and compilation still gate every changed candidate; no judge answers or held-out reference formulas are available.'''
 INSTRUCTIONS = INSTRUCTIONS.replace('24-symbol profile', f'{STATIC_MAX_VARIABLES}-symbol profile')
+INSTRUCTIONS += '\n' + VARIABLE_NAME_GUIDE
 
 
 def _text(value, label):
@@ -63,8 +64,8 @@ def compile_capability(binding, source_row):
         raise ValueError('Capability binding must identify its exact source row')
     for key in ('subject', 'operation', 'scope', 'symbol', 'meaning'):
         _text(binding[key], 'Capability ' + key)
-    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,47}', binding['symbol']):
-        raise ValueError('Capability symbol must be a safe descriptive identifier of at most 48 characters')
+    if not VARIABLE_IDENT.fullmatch(binding['symbol']):
+        raise ValueError(f'Capability symbol must be a safe descriptive identifier of at most {MAX_VARIABLE_NAME_LENGTH} characters')
     _texts(binding['limitations'], 'Capability limitations')
     if not binding['limitations']:
         raise ValueError('Capability limitations must disclose the abstraction boundary')
