@@ -59,10 +59,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     # design-review UI and API remain available for existing saved artifacts.
     from review_canonical import create_router as canonical_router
     from review_evaluation import create_evaluation_router
+    from review_preparation import create_router as preparation_router
     workflow = canonical_router(store.root / "canonical", executor)
     app.state.workflow_store = workflow.workflow_store
     app.include_router(workflow)
     app.include_router(create_evaluation_router(workflow.workflow_store, executor))
+    preparation = preparation_router(store.root / "preparation", executor)
+    app.state.preparation_store = preparation.preparation_store
+    app.include_router(preparation)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")

@@ -14,6 +14,7 @@ import time
 from canonical_abstractions import POLICY_VERSION, POLICY, POLICY_TEXT, PROFILE, representation_summary
 from mutation_core import STATIC_MAX_VARIABLES
 from review_behavior import VARIABLE_NAME_GUIDE
+from prompt_sources import source_prompt_fields
 
 ROOT = Path(__file__).resolve().parents[1]
 TLR_INSTRUCTIONS = '''Return a single JSON object, schema "mbse_tlr/1". Required keys:
@@ -63,6 +64,13 @@ def sources_from_file(path, fmt=None):
     original = read_json(path) if fmt == "json" else None
     rows = parse_requirements(path.read_text(encoding="utf-8"), fmt, path.name)
     original_rows = original.get("requirements") if isinstance(original, dict) else original
+    if isinstance(original, dict) and (
+            "shared_context" in original or
+            isinstance(original.get("schema"), str) and original["schema"].startswith("prepared_source_packet")):
+        from source_packet import expand_prepared_packet
+        # Validate the compact input's byte limit above, then restore the same
+        # per-requirement context consumed by every existing conversion route.
+        original_rows = expand_prepared_packet(original)
     sources = []
     for index, row in enumerate(rows):
         source = {key: value for key, value in row["source"].items() if key != "provenance_status"}
@@ -149,7 +157,7 @@ def _strip_fence(text):
 
 def _prompt(sources, context, name):
     return json.dumps({"model_name": name, "representation_profile": PROFILE,
-        "abstraction_policy": POLICY, "requirements": sources, "fixed_context": context},
+        "abstraction_policy": POLICY, **source_prompt_fields(sources), "fixed_context": context},
         ensure_ascii=False, indent=2)
 
 

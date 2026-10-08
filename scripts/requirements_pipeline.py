@@ -265,6 +265,28 @@ def _codex_reasoning_effort(reasoning_effort=None) -> str:
     return value
 
 
+def _codex_failure_details(stdout, stderr, prompt: str) -> str:
+    """Keep the actual failure tail, excluding the CLI's echoed source prompt."""
+    details = []
+    for label, value in (("stdout", stdout), ("stderr", stderr)):
+        if not value:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+        if prompt.strip():
+            value = value.replace(prompt.strip(), "[source prompt omitted]")
+        value = value.strip()
+        if value:
+            # CLI startup and the echoed request precede its actual error.
+            # A head-only excerpt can hide every useful diagnostic.
+            excerpt = value[-6000:]
+            if len(value) > len(excerpt):
+                excerpt = "[earlier output omitted]\n" + excerpt
+            details.append(f"{label}: {excerpt}")
+    return "\n".join(details) or "Codex returned no diagnostic output."
+
+
 def _run_codex_exec(prompt: str, model: str, *, timeout_seconds=None, reasoning_effort=None) -> str:
     timeout_seconds = _codex_timeout_seconds(timeout_seconds)
     reasoning_effort = _codex_reasoning_effort(reasoning_effort)
@@ -331,8 +353,8 @@ def _run_codex_exec(prompt: str, model: str, *, timeout_seconds=None, reasoning_
                     ) from exc
                 raise RuntimeError(
                     f"codex exec timed out after {timeout_seconds:.0f}s. "
-                    "Increase the call timeout or CODEX_EXEC_TIMEOUT if needed. "
-                    f"stdout={(stdout or '').strip()[:240]!r} stderr={(stderr or '').strip()[:240]!r}"
+                    "Increase the call timeout or CODEX_EXEC_TIMEOUT if needed.\n"
+                    + _codex_failure_details(stdout, stderr, prompt)
                 ) from exc
             result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
         answer = tmp_path.read_text(encoding="utf-8").strip()
@@ -345,12 +367,9 @@ def _run_codex_exec(prompt: str, model: str, *, timeout_seconds=None, reasoning_
                 f"codex exec failed (exit {result.returncode}). "
                 "Streaming was enabled; inspect terminal output above for details."
             )
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
         raise RuntimeError(
-            "codex exec failed "
-            f"(exit {result.returncode}). stdout={stdout[:400]!r} stderr={stderr[:400]!r}. "
-            "Ensure Codex CLI is authenticated and network access is available."
+            f"codex exec failed (exit {result.returncode}).\n"
+            + _codex_failure_details(result.stdout, result.stderr, prompt)
         )
     if not answer:
         raise RuntimeError("codex exec returned an empty response.")

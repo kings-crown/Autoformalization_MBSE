@@ -18,6 +18,7 @@ from canonical_repair import (_check_fixed, _context, _failure, _input, _keys,
 from canonical_tlr import _references
 from mutation_core import STATIC_MAX_VARIABLES
 from review_behavior import VARIABLE_NAME_GUIDE
+from prompt_sources import source_prompt_fields
 
 FEEDBACK_POLICY_VERSION = 'source_grounded_semantic_feedback/3'
 PROPOSAL_SCHEMA = 'semantic_repair_proposal/1'
@@ -322,7 +323,7 @@ def feedback_prompt(sources, context, tlr, feedback=None, previous_failure=None,
     evidence = _checked_feedback(feedback, {r['id'] for r in packet})
     payload = {'task': 'Review every source requirement and return semantic_repair_proposal/1.',
         'feedback_policy': FEEDBACK_POLICY_VERSION, 'feedback_mode': 'solver' if evidence is not None else 'source',
-        'source_packet': packet, 'fixed_context': fixed, 'representation_profile': PROFILE,
+        **source_prompt_fields(packet, 'source_packet'), 'fixed_context': fixed, 'representation_profile': PROFILE,
         'abstraction_policy': deepcopy(POLICY), 'current_tlr': _model_tlr(accepted),
         'source_metadata_policy': MODEL_SOURCE_POLICY.replace('accepted_tlr', 'current_tlr'),
         'solver_feedback': evidence,

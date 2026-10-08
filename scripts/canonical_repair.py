@@ -14,6 +14,7 @@ from canonical_abstractions import POLICY, POLICY_TEXT, POLICY_VERSION, PROFILE
 from canonical_tlr import _references, validate_tlr
 from mutation_core import STATIC_MAX_VARIABLES, validate_context
 from review_behavior import VARIABLE_NAME_GUIDE
+from prompt_sources import source_prompt_fields
 
 RECOVERY_POLICY_VERSION = 'source_grounded_abstention_recovery/2'
 DIAGNOSIS_SCHEMA = 'abstention_diagnosis/1'
@@ -315,7 +316,7 @@ def diagnosis_prompt(sources, context, tlr, previous_failure=None) -> str:
     fixed = _context(context)
     _check_fixed(accepted, fixed)
     payload = {'task': 'Diagnose abstentions without changing the source or existing formalization.',
-               'source_packet': packet, 'fixed_context': fixed, 'representation_profile': PROFILE,
+               **source_prompt_fields(packet, 'source_packet'), 'fixed_context': fixed, 'representation_profile': PROFILE,
                'abstraction_policy': deepcopy(POLICY), 'accepted_tlr': _model_tlr(accepted),
                'source_metadata_policy': MODEL_SOURCE_POLICY,
                'abstained_requirement_ids': [r['id'] for r in accepted['requirements'] if r['status'] != 'supported']}
@@ -332,7 +333,7 @@ def repair_prompt(sources, context, tlr, diagnosis=None, previous_failure=None) 
     eligible = [r['id'] for r in accepted['requirements'] if r['status'] != 'supported']
     payload = {'task': 'Return a complete abstention_proposal/1 envelope using the recovery system instructions.',
         'recovery_policy': RECOVERY_POLICY_VERSION,
-        'source_packet': packet, 'fixed_context': fixed, 'representation_profile': PROFILE,
+        **source_prompt_fields(packet, 'source_packet'), 'fixed_context': fixed, 'representation_profile': PROFILE,
         'abstraction_policy': deepcopy(POLICY), 'accepted_tlr': _model_tlr(accepted),
         'source_metadata_policy': MODEL_SOURCE_POLICY, 'diagnosis': checked,
         'diagnosis_role': 'Advisory only; neither a retain decision nor its proposed rule limits source-grounded recovery.',
