@@ -121,6 +121,7 @@ def _model(requested=None):
 
 def _ask(system, prompt, model, directory, call_id, *, timeout_seconds=None, reasoning_effort=None):
     from requirements_pipeline import _codex_reasoning_effort, _codex_timeout_seconds, _run_codex_exec
+    from canonical_request import compose_request, request_preflight, validate_request_text
     record = {"model": model, "system_prompt": system, "user_prompt": prompt,
               "timeout_seconds": _codex_timeout_seconds(timeout_seconds),
               "reasoning_effort": _codex_reasoning_effort(reasoning_effort),
@@ -129,7 +130,9 @@ def _ask(system, prompt, model, directory, call_id, *, timeout_seconds=None, rea
     started = time.monotonic()
     write_json(directory / (call_id + ".json"), record)
     try:
-        composed = "System instructions:\n" + system.strip() + "\n\nUser request:\n" + prompt.strip() + "\n"
+        composed = compose_request(system, prompt)
+        record["request_preflight"] = request_preflight(system, prompt)
+        validate_request_text(composed)
         options = {}
         if timeout_seconds is not None:
             options["timeout_seconds"] = record["timeout_seconds"]
@@ -332,6 +335,7 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                                     feedback_prompt, solver_feedback, validate_feedback_proposal,
                                     SCENARIO_POLICY_VERSION, scenario_instructions)
     from canonical_tlr import render_sysml
+    from canonical_request import compose_request, request_preflight, RequestSizeError
     mode = "solver" if condition == "C" else "source"
     selected, selected_dir = initial, directory
     ledger = {"schema": "semantic_feedback_repair/1", "policy": FEEDBACK_POLICY_VERSION,
@@ -372,6 +376,7 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
         ledger["stop_reason"] = "initial_compilation_failed"
     else:
         failure = None
+        supplied_concerns = []  # Applies only to the currently selected audit.
         for index in range(1, budget + 1):
             attempt_dir = history / f"{index:03d}"
             attempt_dir.mkdir()
@@ -380,8 +385,10 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                     "accepted": False}
             ledger["steps"].append(step)
             artifact_phase = False
+            delivery = None
             try:
-                feedback = solver_feedback(selected["analysis"], selected_dir) if mode == "solver" else None
+                feedback = (solver_feedback(selected["analysis"], selected_dir,
+                            supplied_concern_ids=supplied_concerns) if mode == "solver" else None)
                 if feedback is not None:
                     write_json(attempt_dir / "solver_feedback.json", feedback)
                 prompt = feedback_prompt(sources, context, selected["tlr"], feedback, previous_failure=failure,
@@ -393,9 +400,46 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                     "\nReturn the outer semantic_repair_proposal/1 envelope, not a bare TLR.")
                 if development_scenarios is not None:
                     instructions += "\n" + scenario_instructions(True)
+                # Check the exact transport envelope, including all instructions,
+                # source/context, prior failure and optional development evidence.
+                # A compact JSON fallback removes whitespace, never source or SMT.
+                preflights = [dict(request_preflight(instructions, prompt), serialization="indented_json")]
+                serialization = "indented_json"
+                if preflights[-1]["status"] != "passed":
+                    prompt = json.dumps(json.loads(prompt), ensure_ascii=False,
+                                        separators=(",", ":"), allow_nan=False)
+                    serialization = "compact_json"
+                    preflights.append(dict(request_preflight(instructions, prompt), serialization=serialization))
+                selection = feedback.get("selection", {}) if feedback is not None else {}
+                delivery = {
+                    "schema": "semantic_feedback_evidence_delivery/1", "status": "prepared",
+                    "based_on": str(selected_dir.relative_to(directory)),
+                    "selected_concern_id": selection.get("selected_concern_id"),
+                    "previously_supplied_concern_ids": list(supplied_concerns),
+                    "remaining_concern_ids": selection.get("remaining_concern_ids", []),
+                    "prepared_detail_check_ids": selection.get("detailed_check_ids", []),
+                    "summary_only_check_ids": selection.get("summary_only_check_ids", []),
+                    "selected_evidence_complete": selection.get("selected_evidence_complete"),
+                    "supplied_to_transport_check_ids": [], "transport_invoked": False,
+                    "response_received": False, "serialization": serialization,
+                    "request_preflights": preflights,
+                    "scope": "Supplied means included in transport input, not proof of LLM inspection or resolution. "
+                             "Summary-only checks have no detailed evidence in this request. "
+                             "All original queries/results remain in the based-on candidate audit."}
+                step["evidence_delivery"] = str((attempt_dir / "evidence_delivery.json").relative_to(directory))
+                (attempt_dir / "request.txt").write_text(compose_request(instructions, prompt), encoding="utf-8")
+                write_json(attempt_dir / "evidence_delivery.json", delivery)
+                if preflights[-1]["status"] != "passed":
+                    delivery["status"] = "blocked_size"
+                    raise RequestSizeError(preflights[-1])
                 ledger["repair_attempts"] += 1
+                delivery.update(status="dispatched", transport_invoked=True,
+                    supplied_to_transport_check_ids=selection.get("detailed_check_ids", []))
+                write_json(attempt_dir / "evidence_delivery.json", delivery)
                 save()
                 response = ask(instructions, prompt, model, attempt_dir, "feedback_call")
+                delivery.update(status="response_received", response_received=True)
+                write_json(attempt_dir / "evidence_delivery.json", delivery)
                 (attempt_dir / "response.txt").write_text(response, encoding="utf-8")
                 (attempt_dir / "proposal_candidate.json").write_text(_strip_fence(response), encoding="utf-8")
                 raw = read_json(attempt_dir / "proposal_candidate.json")
@@ -416,7 +460,15 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                                      for rid in changes["changed_ids"]]})
                 if not changes["progress"]:
                     step["status"] = "unchanged"
-                    ledger["stop_reason"] = "no_change_after_review"
+                    concern = selection.get("selected_concern_id")
+                    if concern is not None:
+                        supplied_concerns.append(concern)
+                    failure = None
+                    # An unchanged proposal is not evidence that undispatched
+                    # concerns were inspected. Advance deterministically while
+                    # the original proposal budget still permits another call.
+                    if not selection.get("remaining_concern_ids"):
+                        ledger["stop_reason"] = "no_change_after_review"
                 else:
                     artifact_phase = True
                     artifacts = _materialize_candidate(attempt_dir, render_sysml(proposed, name), proposed,
@@ -450,14 +502,29 @@ def _refine_with_feedback(initial, sources, context, directory, budget, ask, mod
                         ledger["selected_attempt"] = str(attempt_dir.relative_to(directory))
                         step.update(status="accepted", accepted=True)
                         failure = None
+                        supplied_concerns = []  # Fresh global audit, fresh concerns.
+            except RequestSizeError as exc:
+                step.update(status="blocked", error=str(exc), request_preflight=exc.details)
+                ledger["stop_reason"] = "feedback_input_too_large"
+                if delivery is not None:
+                    delivery["status"] = "blocked_size"
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 step.update(status="rejected", error=error)
                 # Retry parse/schema/source guards under the same finite budget.
                 # Infrastructure failures must not invite reinterpretation of source.
                 failure = error if len(error) <= 12000 else error[:11900] + " [truncated; full error in attempt.json]"
-                if artifact_phase or "prompt.json" not in {p.name for p in attempt_dir.iterdir()}:
+                if "input_too_large" in error or "Input exceeds the maximum length" in error:
+                    # A transport-side rejection is not a semantic diagnosis;
+                    # appending it and retrying the same oversized input cannot help.
+                    ledger["stop_reason"] = "feedback_input_rejected"
+                elif artifact_phase or "prompt.json" not in {p.name for p in attempt_dir.iterdir()}:
                     ledger["stop_reason"] = "candidate_check_failed"
+                if delivery is not None and not delivery["response_received"]:
+                    delivery["status"] = "transport_failed"
+            if delivery is not None:
+                delivery["proposal_status"] = step["status"]
+                write_json(attempt_dir / "evidence_delivery.json", delivery)
             write_json(attempt_dir / "attempt.json", step)
             save()
             if ledger["stop_reason"]:
@@ -523,6 +590,7 @@ def run_candidate(sources, output_dir, condition="C", model=None, name="Requirem
         write_json(directory / "development_suite.json", development_scenarios)
     offline = tlr is not None or sysml_text is not None
     from canonical_feedback import FEEDBACK_POLICY_VERSION
+    from canonical_request import request_preflight
     configuration = {"schema": "canonical_execution/2", "workflow_policy": "direct_tlr_feedback/1",
         "condition": condition, "model": model,
         "generation_mode": "supplied_artifact" if offline else "LLM", "generation_attempts": 0,
@@ -542,6 +610,8 @@ def run_candidate(sources, output_dir, condition="C", model=None, name="Requirem
         "generated_context_repair": "Source-grounded changes recorded in the same feedback proposal; no independent approval implied.",
         "provider_settings": {"reasoning_effort": os.getenv("CODEX_REASONING_EFFORT", "low"),
             "timeout_seconds": os.getenv("CODEX_EXEC_TIMEOUT", "180"),
+            "max_input_chars": request_preflight("", "")["max_chars"],
+            "input_size_unit": "characters (not bytes or model tokens)",
             "sampling": "Codex transport defaults; no temperature override"},
         "created_at": datetime.now(timezone.utc).isoformat()}
     write_json(directory / "configuration.json", configuration)

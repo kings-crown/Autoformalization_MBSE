@@ -190,8 +190,14 @@ class FeedbackExecutionTests(unittest.TestCase):
             self.assertEqual(cli.read_json(path / 'sources.json'), sources)
             self.assertIn('>= 20', (path / 'model.sysml').read_text())
             witness = next(c for c in seen[1]['solver_feedback']['checks'] if c['name'] == 'violatability')
-            self.assertTrue(witness['witness']['query_smt2'])
-            self.assertTrue(witness['witness']['values'])
+            self.assertFalse(witness['evidence_included'])
+            self.assertIsNone(witness['query_smt2'])
+            self.assertFalse(witness['witness']['evidence_included'])
+            # Routine SAT diagnostics are summarized after the genuine conflict
+            # is repaired. Their original queries/witnesses remain available.
+            audit_root = path / 'feedback_attempts/001/audit'
+            self.assertTrue((audit_root / witness['query_file']).is_file())
+            self.assertTrue((audit_root / witness['witness']['query_file']).is_file())
 
     @unittest.skipUnless(shutil.which('z3'), 'Z3 required')
     def test_correct_source_can_introduce_UNSAT_without_being_rejected_to_seek_SAT(self):

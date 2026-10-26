@@ -73,6 +73,17 @@ def put(path, value):
     path.write_text(json.dumps(value), encoding='utf-8')
 
 
+def saved_check(directory, label, status, ids, query=None):
+    query = query or ('(declare-const voltage Real)\n(assert (>= voltage 0))\n' +
+                      ('(assert (< voltage 0))\n' if status == 'unsat' else '') + '(check-sat)\n')
+    record = {'status': status, 'stdout': status + '\n', 'stderr': '', 'exit_code': 0,
+              'purpose': label, 'requirement_ids': ids, 'assumption_ids': ['ENV'],
+              'artifacts': {'query': label + '.smt2', 'result': label + '.json'}}
+    (directory / (label + '.smt2')).write_text(query)
+    put(directory / (label + '.json'), record)
+    return record
+
+
 def audit_fixture(directory):
     directory.mkdir(parents=True, exist_ok=True)
     query = '(declare-const voltage Real)\n(assert (> voltage 28))\n(check-sat)\n'
@@ -90,7 +101,10 @@ def audit_fixture(directory):
     analysis = {'schema': 'canonical_audits/1', 'status': 'passed', 'background_status': 'sat',
         'consistency_status': 'sat', 'requirement_ids': ['R1', 'R2', 'R3'],
         'findings': [{'code': 'redundant_requirement', 'requirement_ids': ['R1'], 'explanation': 'May be legitimate.', 'expected_formula': 'must not enter'}],
-        'inconclusive_checks': [], 'requirements': [{'id': 'R1', 'checks': {'violatability': evidence}}],
+        'inconclusive_checks': [], 'requirements': [{'id': 'R1', 'checks': {'violatability': evidence,
+            'redundancy_context': deepcopy(evidence),
+            'redundancy': saved_check(directory, 'redundancy', 'unsat', ['R1'])}}],
+        'background': saved_check(directory, 'background', 'sat', []),
         'judges': ['held-out'], 'mutation_results': {'expected': 'held-out'}}
     put(directory / 'audit.json', analysis)
     return analysis, query, witness_query
@@ -430,36 +444,51 @@ class GeneratedContextRepairTests(unittest.TestCase):
 
 
 class EvidenceAndPromptTests(unittest.TestCase):
-    def test_exact_queries_results_and_sat_witness_survive_without_evaluation_metadata(self):
+    def test_exact_selected_dependency_query_and_witness_exclude_evaluation_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); analysis, query, witness_query = audit_fixture(root / 'audit')
+            snapshot = deepcopy(analysis)
             with patch('mutation_core._execute', side_effect=AssertionError('Read-only evidence adapter')):
                 feedback = solver_feedback(analysis, root)
-            evidence = feedback['checks'][0]
+            checks = {row['check_id']: row for row in feedback['checks']}
+            evidence = checks['redundancy_context:R1']
             self.assertEqual(evidence['query_smt2'], query)
             self.assertEqual(evidence['result']['stdout'], 'sat\n')
             self.assertEqual(evidence['witness']['query_smt2'], witness_query)
             self.assertEqual(evidence['witness']['result']['stdout'], 'sat\n((voltage 29.0))\n')
             self.assertEqual(evidence['witness']['values'], {'voltage': '29.0'})
+            self.assertTrue(evidence['evidence_complete'])
             self.assertNotIn('held-out', json.dumps(feedback))
             self.assertNotIn('must not enter', json.dumps(feedback))
             self.assertNotIn('must never enter', json.dumps(feedback))
             self.assertEqual(solver_feedback(analysis, root / 'audit'), feedback)
+            self.assertEqual(analysis, snapshot)
+            self.assertEqual(feedback['selection']['selected_concern_id'], 'finding:redundant_requirement:R1')
+            self.assertTrue(feedback['selection']['selected_evidence_complete'])
+            self.assertFalse(feedback['selection']['all_concern_packets_supplied'])
+            self.assertIsNone(checks['violatability:R1']['query_smt2'])
 
-    def test_missing_query_is_explicit_not_a_fabricated_proof(self):
+    def test_missing_selected_query_is_explicit_and_history_does_not_make_it_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); analysis, _, _ = audit_fixture(root)
             (root / 'violation.smt2').unlink()
-            check = solver_feedback(analysis, root)['checks'][0]
+            feedback = solver_feedback(analysis, root)
+            check = next(row for row in feedback['checks'] if row['check_id'] == 'redundancy_context:R1')
             self.assertIsNone(check['query_smt2'])
             self.assertIn('violation.smt2', check['evidence_missing'])
+            self.assertFalse(check['evidence_complete'])
+            self.assertFalse(feedback['selection']['selected_evidence_complete'])
+            self.assertFalse(feedback['selection']['all_concern_packets_supplied'])
+            later = solver_feedback(analysis, root, supplied_concern_ids=[feedback['selection']['selected_concern_id']])
+            self.assertIsNone(later['selection']['selected_concern_id'])
+            self.assertFalse(later['selection']['all_concern_packets_supplied'])
 
-    def test_artifact_escape_and_mismatched_record_are_rejected(self):
+    def test_artifact_escape_and_selected_mismatched_result_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); analysis, _, _ = audit_fixture(root / 'audit')
             raw = deepcopy(analysis); raw['requirements'][0]['checks']['violatability']['artifacts']['query'] = '../other.smt2'
             with self.assertRaisesRegex(ValueError, 'inside'): solver_feedback(raw, root)
-            raw = deepcopy(analysis); raw['requirements'][0]['checks']['violatability']['stdout'] = 'unsat\n'
+            raw = deepcopy(analysis); raw['requirements'][0]['checks']['redundancy_context']['stdout'] = 'unsat\n'
             with self.assertRaisesRegex(ValueError, 'disagrees'): solver_feedback(raw, root)
 
     def test_source_prompt_is_compact_full_source_and_has_no_solver_evidence(self):
@@ -473,13 +502,14 @@ class EvidenceAndPromptTests(unittest.TestCase):
             self.assertEqual(compact, {k: v for k, v in original.items() if k not in {'text', 'source'}})
         self.assertEqual(before, snapshot)
 
-    def test_solver_prompt_includes_exact_query_and_rejects_foreign_source_or_metadata(self):
+    def test_solver_prompt_accepts_v2_exact_evidence_and_rejects_foreign_source_or_metadata(self):
         sources, before = fixture()
         with tempfile.TemporaryDirectory() as tmp:
             analysis, query, _ = audit_fixture(Path(tmp)); feedback = solver_feedback(analysis, tmp)
             payload = json.loads(feedback_prompt(sources, None, before, feedback, 'Previous proposal changed a frozen domain.'))
             self.assertEqual(payload['feedback_mode'], 'solver')
-            self.assertEqual(payload['solver_feedback']['checks'][0]['query_smt2'], query)
+            check = next(row for row in payload['solver_feedback']['checks'] if row['check_id'] == 'redundancy_context:R1')
+            self.assertEqual(check['query_smt2'], query)
             self.assertEqual(payload['previous_failure'], 'Previous proposal changed a frozen domain.')
             foreign = deepcopy(feedback); foreign['requirement_ids'] = ['OTHER']
             with self.assertRaisesRegex(ValueError, 'source IDs'): feedback_prompt(sources, None, before, foreign)
@@ -490,80 +520,195 @@ class EvidenceAndPromptTests(unittest.TestCase):
         sources, before = fixture(); before['requirements'][0]['text'] = 'Voltage at most 29 V.'
         with self.assertRaisesRegex(ValueError, 'fixed source'): feedback_prompt(sources, None, before)
 
-    def test_selection_omits_repeated_checks_but_retains_the_complete_index(self):
+    def test_routine_sat_queries_and_large_witnesses_are_indexed_without_heavy_bodies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); analysis, _, _ = audit_fixture(root)
             original = analysis['requirements'][0]['checks']['violatability']
+            original['witness']['voltage'] = 'LARGE-WITNESS-' * 20000
             analysis['findings'] = []
-            analysis['background'] = deepcopy(original); analysis['consistency'] = deepcopy(original)
-            for name in ('redundancy_context', 'redundancy', 'in_model_trigger'):
-                analysis['requirements'][0]['checks'][name] = deepcopy(original)
+            analysis['consistency'] = deepcopy(original)
+            analysis['requirements'][0]['checks'] = {name: deepcopy(original) for name in (
+                'trigger_reachability', 'in_model_trigger', 'violatability', 'redundancy_context', 'redundancy')}
             feedback = solver_feedback(analysis, root)
-            indexed = {c['name']: c for c in feedback['checks']}
-            self.assertEqual(len(indexed), 6)
-            self.assertTrue(all(indexed[name]['evidence_included'] for name in ('background', 'consistency', 'violatability')))
-            for name in ('redundancy_context', 'redundancy', 'in_model_trigger'):
-                self.assertFalse(indexed[name]['evidence_included'])
-                self.assertIsNone(indexed[name]['query_smt2'])
-                self.assertEqual(indexed[name]['query_file'], 'violation.smt2')
-                self.assertEqual(indexed[name]['status'], 'sat')
-                self.assertFalse(indexed[name]['witness']['evidence_included'])
-            self.assertEqual(feedback['selection']['omitted_by_policy_count'], 3)
-            self.assertEqual(feedback['selection']['omitted_by_cap_count'], 0)
-            self.assertTrue(feedback['selection']['index_complete'])
-            self.assertIn('(assert (> voltage 28))', (root / 'violation.smt2').read_text())
+            self.assertEqual(len(feedback['checks']), 7)
+            self.assertIsNone(feedback['selection']['selected_concern_id'])
+            self.assertEqual(feedback['selection']['concerns'], [])
+            self.assertEqual(feedback['selection']['detailed_check_ids'], [])
+            self.assertEqual(len(feedback['selection']['summary_only_check_ids']), 7)
+            self.assertTrue(feedback['selection']['all_concern_packets_supplied'])
+            for check in feedback['checks']:
+                self.assertFalse(check['evidence_included'])
+                self.assertIsNone(check['query_smt2'])
+                self.assertIsNone(check['result'])
+                self.assertIsNotNone(check['query_file'])
+            self.assertNotIn('LARGE-WITNESS-', json.dumps(feedback))
+            self.assertLess(len(json.dumps(feedback)), 15000)
 
-    def test_findings_and_inconclusives_promote_corresponding_exact_evidence(self):
+    def test_routine_membership_arrays_are_counted_once_per_index_entry_not_repeated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); analysis, _, _ = audit_fixture(root)
             original = analysis['requirements'][0]['checks']['violatability']
-            for name in ('trigger_reachability', 'in_model_trigger', 'redundancy_context', 'redundancy'):
-                check = {'status': 'unknown' if name == 'trigger_reachability' else 'sat',
-                         'purpose': name, 'requirement_ids': ['R1'],
-                         'artifacts': {'query': name + '.smt2', 'result': name + '.json'}}
-                check['stdout'] = check['status'] + '\n'
-                (root / (name + '.smt2')).write_text('; ' + name + '\n(check-sat)\n')
-                put(root / (name + '.json'), check)
-                analysis['requirements'][0]['checks'][name] = check
-            analysis['findings'].append({'code': 'trigger_excluded_by_specification', 'requirement_ids': ['R1'], 'explanation': 'Inspect the complete specification.'})
-            analysis['inconclusive_checks'] = [{'check': 'trigger_reachability', 'status': 'unknown', 'requirement_ids': ['R1']}]
+            ids = [f'REQUIREMENT_LONG_SOURCE_IDENTIFIER_{i:04}' for i in range(80)]
+            assumptions = [f'ENVIRONMENTAL_ASSUMPTION_IDENTIFIER_{i:03}' for i in range(60)]
+            original['requirement_ids'] = ids
+            original['assumption_ids'] = assumptions
+            analysis['requirement_ids'] = ids
+            analysis['findings'] = []
+            analysis['requirements'] = [{'id': rid, 'checks': {'redundancy_context': deepcopy(original)}} for rid in ids]
+            before_query = (root / 'violation.smt2').read_bytes()
             feedback = solver_feedback(analysis, root)
-            self.assertEqual(feedback['selection']['included_checks'], 5)
-            reasons = {c['name']: c['selection_reason'] for c in feedback['checks']}
-            self.assertEqual(reasons['trigger_reachability'], 'inconclusive:trigger_reachability')
-            self.assertEqual(reasons['in_model_trigger'], 'finding:trigger_excluded_by_specification')
-            self.assertEqual(reasons['redundancy'], 'finding:redundant_requirement')
-            self.assertEqual(reasons['redundancy_context'], 'finding:redundant_requirement')
-            self.assertEqual(reasons['violatability'], 'ordinary_violatability_diagnostic')
+            for row in feedback['checks']:
+                self.assertNotIn('requirement_ids', row)
+                self.assertNotIn('assumption_ids', row)
+                self.assertIsNone(row['query_smt2'])
+                if row['name'] == 'redundancy_context':
+                    self.assertEqual(row['requirement_count'], 80)
+                    self.assertEqual(row['assumption_count'], 60)
+                    self.assertIn(row['target_requirement_id'], ids)
+                    self.assertEqual(row['query_file'], 'violation.smt2')
+                    self.assertEqual(row['result_file'], 'violation.json')
+            self.assertEqual(feedback['requirement_ids'], ids)
+            self.assertNotIn(assumptions[0], json.dumps(feedback))
+            self.assertLess(len(json.dumps(feedback)), 110000)
+            self.assertEqual((root / 'violation.smt2').read_bytes(), before_query)
 
-    def test_selection_cap_is_disclosed_stable_and_prioritizes_globals_and_findings(self):
+    def test_selected_detail_keeps_membership_lists_while_same_routine_query_is_summary_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); analysis, query, _ = audit_fixture(root)
+            feedback = solver_feedback(analysis, root)
+            rows = {row['check_id']: row for row in feedback['checks']}
+            exact = rows['redundancy_context:R1']
+            routine = rows['violatability:R1']
+            self.assertEqual(exact['requirement_ids'], ['R1'])
+            self.assertEqual(exact['query_smt2'], query)
+            self.assertEqual(rows['redundancy:R1']['assumption_ids'], ['ENV'])
+            self.assertNotIn('requirement_count', exact)
+            self.assertNotIn('requirement_ids', routine)
+            self.assertNotIn('assumption_ids', routine)
+            self.assertEqual(routine['requirement_count'], 1)
+            self.assertEqual(routine['assumption_count'], 0)
+            self.assertEqual(routine['query_file'], exact['query_file'])
+
+    def test_selected_global_conflict_retains_exact_assumptions_and_cross_requirement_constraints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); analysis, _, _ = audit_fixture(root)
+            query = ('(set-logic QF_LIRA)\n(declare-const voltage Real)\n'
+                     '(declare-const power Bool)\n(assert power)\n(assert (>= voltage 0))\n'
+                     '(assert (<= voltage 28))\n(assert (> voltage 30))\n(check-sat)\n')
+            analysis['consistency'] = saved_check(root, 'consistency', 'unsat', ['R1', 'R2'], query)
+            analysis['consistency_status'] = 'unsat'
+            analysis['findings'].append({'code': 'inconsistent_requirements', 'requirement_ids': ['R1', 'R2'],
+                                        'explanation': 'Both source-linked bounds conflict under the declared context.'})
+            feedback = solver_feedback(analysis, root)
+            selection = feedback['selection']
+            self.assertEqual(selection['selected_concern_id'], 'finding:inconsistent_requirements:R1,R2')
+            self.assertEqual(set(selection['detailed_check_ids']), {'background:@global', 'consistency:@global'})
+            exact = next(c for c in feedback['checks'] if c['check_id'] == 'consistency:@global')
+            self.assertEqual(exact['query_smt2'], query)
+            self.assertEqual(exact['assumption_ids'], ['ENV'])
+            self.assertEqual(exact['requirement_ids'], ['R1', 'R2'])
+            self.assertEqual(selection['remaining_concern_ids'], ['finding:redundant_requirement:R1'])
+
+    def test_second_concern_requires_history_and_does_not_resend_prior_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); analysis, _, _ = audit_fixture(root)
+            analysis['requirements'][0]['checks']['trigger_reachability'] = saved_check(root, 'trigger', 'unsat', ['R1'])
+            analysis['findings'].append({'code': 'unreachable_trigger', 'requirement_ids': ['R1'],
+                                        'explanation': 'Investigate the impossible antecedent.'})
+            first = solver_feedback(analysis, root)
+            self.assertEqual(first['selection']['selected_concern_id'], 'finding:unreachable_trigger:R1')
+            self.assertFalse(first['selection']['all_concern_packets_supplied'])
+            history = [first['selection']['selected_concern_id']]
+            second = solver_feedback(analysis, root, supplied_concern_ids=history)
+            self.assertEqual(second['selection']['supplied_concern_ids'], history)
+            self.assertEqual(second['selection']['selected_concern_id'], 'finding:redundant_requirement:R1')
+            self.assertEqual(second['selection']['remaining_concern_ids'], [])
+            self.assertFalse(second['selection']['all_concern_packets_supplied'])
+            checks = {c['check_id']: c for c in second['checks']}
+            self.assertIsNone(checks['trigger_reachability:R1']['query_smt2'])
+            self.assertTrue(checks['redundancy_context:R1']['evidence_included'])
+            self.assertTrue(checks['redundancy:R1']['evidence_included'])
+            self.assertFalse(checks['violatability:R1']['evidence_included'])
+            last = solver_feedback(analysis, root, supplied_concern_ids=history + [second['selection']['selected_concern_id']])
+            self.assertIsNone(last['selection']['selected_concern_id'])
+            self.assertEqual(last['selection']['detailed_check_ids'], [])
+            self.assertTrue(last['selection']['all_concern_packets_supplied'])
+            self.assertEqual(history, [first['selection']['selected_concern_id']])
+
+    def test_in_model_trigger_packet_contains_necessary_context_checks_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); analysis, _, _ = audit_fixture(root)
+            checks = analysis['requirements'][0]['checks']
+            checks['trigger_reachability'] = saved_check(root, 'trigger', 'sat', ['R1'])
+            checks['in_model_trigger'] = saved_check(root, 'in_model', 'unsat', ['R1', 'R2'])
+            analysis['consistency'] = saved_check(root, 'consistency', 'sat', ['R1', 'R2'])
+            analysis['findings'] = [{'code': 'trigger_excluded_by_specification', 'requirement_ids': ['R1'],
+                'conflicting_requirement_ids': ['R1', 'R2'], 'explanation': 'The otherwise feasible specification blocks the trigger.'}]
+            feedback = solver_feedback(analysis, root)
+            self.assertEqual(set(feedback['selection']['detailed_check_ids']),
+                {'background:@global', 'consistency:@global', 'trigger_reachability:R1', 'in_model_trigger:R1'})
+            self.assertEqual(feedback['selection']['concerns'][0]['requirement_ids'], ['R1', 'R2'])
+            self.assertNotIn('redundancy:R1', feedback['selection']['detailed_check_ids'])
+
+    def test_inconclusive_checks_precede_findings_even_with_missing_error_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); analysis, _, _ = audit_fixture(root)
+            check = saved_check(root, 'trigger', 'unknown', ['R1'])
+            analysis['requirements'][0]['checks']['trigger_reachability'] = check
+            analysis['inconclusive_checks'] = [{'check': 'trigger', 'status': 'unknown', 'requirement_ids': ['R1']}]
+            feedback = solver_feedback(analysis, root)
+            self.assertEqual(feedback['selection']['selected_concern_id'], 'inconclusive:trigger_reachability:R1')
+            self.assertEqual(len([c for c in feedback['selection']['concerns'] if c['kind'] == 'inconclusive_check']), 1)
+            self.assertTrue(feedback['selection']['selected_evidence_complete'])
+            (root / 'trigger.smt2').unlink()
+            incomplete = solver_feedback(analysis, root)
+            self.assertFalse(incomplete['selection']['selected_evidence_complete'])
+            error = {'schema': 'canonical_audits/1', 'status': 'inconclusive', 'requirement_ids': ['R1'],
+                     'background_status': 'encoding_error', 'consistency_status': 'not_run',
+                     'diagnostic': 'Invalid input prevented encoding.', 'findings': [],
+                     'inconclusive_checks': [{'check': 'validation', 'status': 'encoding_error', 'requirement_ids': []}]}
+            raw = solver_feedback(error, root)
+            self.assertFalse(raw['selection']['selected_evidence_complete'])
+            self.assertFalse(raw['selection']['all_concern_packets_supplied'])
+            self.assertTrue(any(c['status'] == 'encoding_error' and c['query_smt2'] is None for c in raw['checks']))
+            selected = [c for c in raw['checks'] if c['evidence_included'] and c['status'] == 'encoding_error']
+            self.assertTrue(selected)
+            self.assertTrue(all({'query', 'result'} <= set(c['evidence_missing']) for c in selected))
+
+    def test_unknown_duplicate_or_untyped_history_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis, _, _ = audit_fixture(Path(tmp))
+            for history in ('finding:redundant_requirement:R1', ['unknown'], [True],
+                            ['finding:redundant_requirement:R1'] * 2):
+                with self.subTest(history=history), self.assertRaisesRegex(ValueError, 'concern'):
+                    solver_feedback(analysis, tmp, supplied_concern_ids=history)
+
+    def test_large_audit_has_no_routine_sat_evidence_fanout_or_sixty_four_check_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); analysis, _, _ = audit_fixture(root)
             original = analysis['requirements'][0]['checks']['violatability']
-            analysis['background'] = deepcopy(original); analysis['consistency'] = deepcopy(original)
+            analysis['consistency'] = deepcopy(original)
             analysis['requirement_ids'] = [f'R{i}' for i in range(70)]
             analysis['requirements'] = [{'id': rid, 'checks': {'violatability': deepcopy(original)}} for rid in analysis['requirement_ids']]
-            analysis['requirements'][-1]['checks']['redundancy'] = deepcopy(original)
-            analysis['requirements'][-1]['checks']['redundancy_context'] = deepcopy(original)
+            checks = analysis['requirements'][-1]['checks']
+            checks['redundancy'] = saved_check(root, 'redundancy', 'unsat', ['R69'])
+            checks['redundancy_context'] = deepcopy(original)
             analysis['findings'] = [{'code': 'redundant_requirement', 'requirement_ids': ['R69'], 'explanation': 'Inspect this legitimate relation.'}]
             first = solver_feedback(analysis, root)
             self.assertEqual(first, solver_feedback(analysis, root))
-            self.assertEqual(first['selection']['included_checks'], 64)
-            self.assertEqual(first['selection']['executed_checks'], 74)
-            self.assertEqual(first['selection']['omitted_by_cap_count'], 10)
-            self.assertEqual(first['selection']['omitted_by_policy_count'], 0)
-            selected = {(c['name'], c['target_requirement_id']) for c in first['checks'] if c['evidence_included']}
-            self.assertTrue({('background', None), ('consistency', None), ('redundancy', 'R69'), ('redundancy_context', 'R69')} <= selected)
-            self.assertIn(('violatability', 'R59'), selected)
-            self.assertNotIn(('violatability', 'R60'), selected)
-            self.assertEqual(len(first['selection']['omitted_queries']), 10)
+            self.assertEqual(first['selection']['total_indexed_checks'], 74)
+            self.assertEqual(first['selection']['included_checks'], 3)
+            self.assertEqual(set(first['selection']['detailed_check_ids']),
+                             {'background:@global', 'redundancy:R69', 'redundancy_context:R69'})
+            self.assertEqual(len(first['selection']['summary_only_check_ids']), 71)
 
-    def test_instructions_do_not_treat_expected_audit_results_as_defects(self):
-        self.assertEqual(FEEDBACK_POLICY_VERSION, 'source_grounded_semantic_feedback/3')
+    def test_instructions_distinguish_supplied_evidence_from_review_or_defect_claims(self):
+        self.assertEqual(FEEDBACK_POLICY_VERSION, 'source_grounded_semantic_feedback/4')
         for phrase in ('SAT violatability query is ordinarily expected', 'UNSAT redundancy can be legitimate',
                        'real conflict in the unchanged source must remain visible',
                        'Previously supported formulas MAY change', 'loss of formal coverage',
-                       'final judges', 'mutation labels/results'):
+                       'final judges', 'mutation labels/results', 'indexed reference is not a supplied query',
+                       'delivery history, not approval'):
             self.assertIn(phrase, FEEDBACK_INSTRUCTIONS)
 
 

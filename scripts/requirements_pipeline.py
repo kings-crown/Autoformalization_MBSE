@@ -39,6 +39,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from canonical_request import compose_request, validate_request_text
 from tlr_contracts import (
     as_requirements_tlr,
     convert_requirements_tlr_to_logical_form_tlr,
@@ -288,6 +289,7 @@ def _codex_failure_details(stdout, stderr, prompt: str) -> str:
 
 
 def _run_codex_exec(prompt: str, model: str, *, timeout_seconds=None, reasoning_effort=None) -> str:
+    validate_request_text(prompt)
     timeout_seconds = _codex_timeout_seconds(timeout_seconds)
     reasoning_effort = _codex_reasoning_effort(reasoning_effort)
     codex_path = shutil.which("codex")
@@ -378,12 +380,8 @@ def _run_codex_exec(prompt: str, model: str, *, timeout_seconds=None, reasoning_
 
 async def _codex_chat_text(system_prompt: str, user_prompt: str, model: str) -> str:
     resolved_model = _resolve_codex_model(model)
-    composed_prompt = (
-        "System instructions:\n"
-        f"{system_prompt.strip()}\n\n"
-        "User request:\n"
-        f"{user_prompt.strip()}\n"
-    )
+    composed_prompt = compose_request(system_prompt, user_prompt)
+    validate_request_text(composed_prompt)
     response = await asyncio.to_thread(_run_codex_exec, composed_prompt, resolved_model)
     return _strip_markdown_code_fences(response).strip()
 
