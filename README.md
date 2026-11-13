@@ -193,6 +193,8 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Upload requirements and con
 
 The [GUI guide](docs/GUI_CANONICAL_WORKFLOW.md) documents inspection, separate evaluation jobs, recorded engineering opinions, and artifacts. Runs default to `out/review_workbench/canonical`. The [workbench guide](prototypes/review-workbench/README.md) documents compatibility tools at `/legacy`. Sharing the implementation does not establish GUI usability or reduced engineer effort.
 
+![GUI and Workflow Demo GIF](GMT20261113-170215_gif.gif)
+
 ## Implementation regression tests
 
 ```bash
